@@ -1,7 +1,7 @@
 # main.py
 # Analyse multimodale de la temporalité (texte + audio + images) – SHS/Politique
 # Encodage images strict 1 fps : i_{N}s_1fps.jpg  => t_image = N (seconde entière)
-# Texte sous image aligné à la seconde (à partir des timestamps Whisper et du texte corrigé)
+# Texte sous image aligné au mot (à partir des timestamps Whisper et du texte corrigé)
 # Attitudes : normalisation d’entrée pour éviter les erreurs de type
 # Vidéo supprimée sous les images
 
@@ -14,7 +14,11 @@ import altair as alt
 import spacy
 import librosa
 
-from timestamp import construire_df_timestamps_pour_fichier, charger_timestamps_depuis_fichier
+from timestamp import (
+    construire_df_timestamps_pour_fichier,
+    construire_df_timestamps_mots,
+    charger_timestamps_depuis_fichier,
+)
 from definitions import obtenir_definitions, obtenir_glossaire, afficher_legendes
 from dictionnaire import (
     deictiques_proches,
@@ -26,6 +30,7 @@ from dictionnaire import (
 )
 from tests import ui_tests_auto, ui_tests_croises
 from attitudes import calculer_attitudes_depuis_images, ui_attitudes_images
+from images import ui_images
 
 # whisper optionnel
 try:
@@ -411,9 +416,40 @@ def transcrire_whisper_en_segments(file_bytes: bytes, langue: str = "fr") -> lis
 st.set_page_config(page_title="Temporalité multimodale – SHS/Politique", layout="wide")
 st.title("Analyse multimodale de la temporalité (texte + audio + images)")
 
-for k in ["df_docs","df_segt","df_audio","df_sega","plots_audio","df_images","images_store","images_store_map","df_align","df_align_sec","df_attitudes","texts_map","texte_corrige_global"]:
+for k in [
+    "df_docs",
+    "df_segt",
+    "df_audio",
+    "df_sega",
+    "plots_audio",
+    "df_images",
+    "images_store",
+    "images_store_map",
+    "df_align",
+    "df_align_sec",
+    "df_align_mots",
+    "df_attitudes",
+    "texts_map",
+    "texte_corrige_global",
+]:
     if k not in st.session_state:
-        st.session_state[k] = None if k in ["df_docs","df_segt","df_audio","df_sega","df_images","df_align","df_align_sec","df_attitudes","texte_corrige_global"] else ({} if k in ["images_store_map","texts_map"] else [])
+        st.session_state[k] = (
+            None
+            if k
+            in [
+                "df_docs",
+                "df_segt",
+                "df_audio",
+                "df_sega",
+                "df_images",
+                "df_align",
+                "df_align_sec",
+                "df_align_mots",
+                "df_attitudes",
+                "texte_corrige_global",
+            ]
+            else ({} if k in ["images_store_map", "texts_map"] else [])
+        )
 
 tab_data, tab_analyse, tab_tests, tab_attitudes, tab_legend = st.tabs(
     ["1. Données", "2. Analyse", "3. Tests croisés", "4. Attitudes", "Légendes"]
@@ -445,6 +481,7 @@ if lancer:
         st.subheader("Texte – Documents et segments (phrases)")
         docs_rows, segments_txt_rows = [], []
         df_align_sec_uploaded = None
+        st.session_state["df_align_mots"] = pd.DataFrame(columns=["idx", "mot", "t_debut", "t_fin"])
         if fichiers_txt:
             if nlp is None:
                 st.error("Aucun modèle spaCy utilisable. Installez fr_dep_news_trf.")
@@ -543,6 +580,12 @@ if lancer:
             )
             st.session_state["df_align"] = df_align.copy()
 
+            df_align_mots = construire_df_timestamps_mots(
+                texte_corrige=texte_corrige,
+                segs_whisper=segs_all,
+            )
+            st.session_state["df_align_mots"] = df_align_mots.copy()
+
             # construction robuste df_align_sec
             df_align_sec = None
             if isinstance(df_align, pd.DataFrame) and not df_align.empty:
@@ -618,10 +661,30 @@ with tab_analyse:
 
     st.subheader("Galerie d’images synchronisée (1 image = 1 seconde)")
     df_images = st.session_state.get("df_images")
+    df_align_mots = st.session_state.get("df_align_mots")
     df_align_sec = st.session_state.get("df_align_sec")
     if df_images is None or df_images.empty:
         st.caption("Aucune image importée.")
+    elif df_align_mots is not None and not df_align_mots.empty:
+        col_opts = st.columns(3)
+        with col_opts[0]:
+            tol_mot_s = st.number_input("Tolérance alignement mot (s)", value=0.40, min_value=0.05, max_value=2.0, step=0.05, format="%.2f")
+        with col_opts[1]:
+            k_avant = st.number_input("Mots avant", value=4, min_value=0, max_value=20, step=1)
+        with col_opts[2]:
+            k_apres = st.number_input("Mots après", value=6, min_value=0, max_value=20, step=1)
+
+        ui_images(
+            df_images,
+            df_mots_aligne=df_align_mots,
+            titre="Galerie d’images synchronisée (mot à mot)",
+            tol_mot_s=float(tol_mot_s),
+            k_avant=int(k_avant),
+            k_apres=int(k_apres),
+        )
     else:
+        st.info("Aucun alignement mot-à-mot disponible. Affichage par seconde (texte agrégé).")
+
         vals = df_images["t_image"].dropna().values if "t_image" in df_images.columns else []
         tmin = int(np.nanmin(vals)) if len(vals) else 0
         tmax = int(np.nanmax(vals)) if len(vals) else 0
