@@ -32,6 +32,7 @@ from tests import ui_tests_auto, ui_tests_croises
 from attitudes import calculer_attitudes_depuis_images, ui_attitudes_images
 from emotions import ui_emotions_images
 from images import ui_images
+from anomalies import ui_anomalies
 
 # whisper optionnel
 try:
@@ -453,13 +454,14 @@ for k in [
             else ({} if k in ["images_store_map", "texts_map"] else [])
         )
 
-tab_data, tab_analyse, tab_tests, tab_attitudes, tab_emotions, tab_legend = st.tabs(
+tab_data, tab_analyse, tab_anomalies, tab_tests, tab_attitudes, tab_emotions, tab_legend = st.tabs(
     [
         "1. Données",
         "2. Analyse",
-        "3. Tests croisés",
-        "4. Attitudes",
-        "5. Émotions",
+        "3. Anomalies",
+        "4. Tests croisés",
+        "5. Attitudes",
+        "6. Émotions",
         "Légendes",
     ]
 )
@@ -543,6 +545,7 @@ if lancer:
         st.subheader("Audio – Récapitulatif et alignement (timestamps Whisper)")
         audio_rows, plots_audio = [], []
         segs_all = []
+        segs_rows = []
         if fichiers_audio:
             for f in fichiers_audio:
                 fbytes = f.read()
@@ -554,6 +557,17 @@ if lancer:
                 segs = transcrire_whisper_en_segments(fbytes, langue="fr") if use_whisper else []
                 if segs:
                     segs_all.extend(segs)
+                    segs_rows.extend(
+                        {
+                            "modalite": "audio_segment",
+                            "fichier": f.name,
+                            "locuteur": locuteur_global,
+                            "t_debut": float(t0),
+                            "t_fin": float(t1),
+                            "segment": texte,
+                        }
+                        for t0, t1, texte in segs
+                    )
                 audio_rows.append({
                     "modalite":"audio","fichier":f.name,"locuteur":locuteur_global,
                     "nb_pauses":res["nb_pauses"],
@@ -565,6 +579,12 @@ if lancer:
                     "duree_audio_s":res["duree_audio_s"]
                 })
                 plots_audio.append((f.name, df_ts, df_pauses, df_debit_sec, df_parole_pause_sec))
+
+        if segs_rows:
+            df_sega = pd.DataFrame(list(segs_rows))
+            st.session_state["df_sega"] = df_sega.copy()
+        else:
+            st.session_state["df_sega"] = pd.DataFrame(columns=["modalite", "fichier", "locuteur", "t_debut", "t_fin", "segment"])
 
         texte_corrige = st.session_state.get("texte_corrige_global", "")
         if fichier_timestamps is not None:
@@ -737,8 +757,24 @@ with tab_analyse:
                             c.image(b, caption=leg, use_container_width=True)
                         else:
                             c.write(nm)
-            else:
-                st.caption("Aucune image dans cette fenêtre.")
+
+with tab_anomalies:
+    df_txt_segments = st.session_state.get("df_segt")
+    df_audio_resumes = st.session_state.get("df_sega")
+    if df_audio_resumes is None or getattr(df_audio_resumes, "empty", True):
+        df_audio_resumes = st.session_state.get("df_audio")
+    df_sync_nv = st.session_state.get("df_attitudes")
+    try:
+        ui_anomalies(
+            df_texte=df_txt_segments,
+            df_audio=df_audio_resumes,
+            df_sync=df_sync_nv,
+            temps_texte="t_debut",
+            temps_audio="t_debut",
+            temps_sync="t_image",
+        )
+    except Exception as e:
+        st.error(f"Erreur interface anomalies : {e}")
 
 with tab_tests:
     dfs = {}
