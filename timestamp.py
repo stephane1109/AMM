@@ -5,6 +5,8 @@
 # puis on aligne ces tokens "horodatés" aux tokens du texte corrigé.
 
 from __future__ import annotations
+import io
+import json
 import re
 import math
 from difflib import SequenceMatcher
@@ -183,3 +185,151 @@ def construire_df_timestamps_pour_fichier(texte_corrige: str, segs_whisper: List
             continue
         lignes.append({"t_debut": float(t0), "t_fin": float(t1), "segment": s})
     return pd.DataFrame(lignes)
+
+
+# =========================
+# import manuel de timestamps externes (1 Hz)
+# =========================
+
+_TIME_COL_CANDIDATES = [
+    "t_sec", "sec", "second", "seconde", "seconds", "time", "temps", "timestamp", "t", "start",
+]
+_TEXT_COL_CANDIDATES = [
+    "texte", "texte_sec", "text", "segment", "contenu", "transcription", "caption", "phrase",
+]
+
+
+def _to_seconds_generic(val) -> float | None:
+    """convertit divers formats (float, hh:mm:ss, mm:ss) en secondes."""
+    if val is None:
+        return None
+    if isinstance(val, (int, float, np.integer, np.floating)):
+        if isinstance(val, float) and math.isnan(val):
+            return None
+        return float(val)
+    s = str(val).strip()
+    if not s:
+        return None
+    s = s.replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    m = re.match(r"^(?:(\d+):)?(\d{1,2}):(\d{1,2})(?:[\.,](\d+))?", s)
+    if not m:
+        return None
+    h = int(m.group(1) or 0)
+    m_ = int(m.group(2))
+    s_ = int(m.group(3))
+    frac = 0.0
+    if m.group(4):
+        frac = float(f"0.{m.group(4)}")
+    return h * 3600.0 + m_ * 60.0 + s_ + frac
+
+
+def _select_column(columns: list[str], candidates: list[str]) -> str | None:
+    lowered = {c.lower(): c for c in columns}
+    for cand in candidates:
+        if cand in lowered:
+            return lowered[cand]
+    for cand in candidates:
+        for c in columns:
+            if cand in c.lower():
+                return c
+    return None
+
+
+def _df_from_json_payload(payload) -> pd.DataFrame:
+    rows = []
+    if isinstance(payload, dict):
+        payload = payload.get("timestamps") or payload.get("data") or payload
+    if isinstance(payload, list):
+        for item in payload:
+            if isinstance(item, dict):
+                t_val = None
+                txt_val = None
+                for key, value in item.items():
+                    key_l = str(key).lower()
+                    if t_val is None and any(cand in key_l for cand in _TIME_COL_CANDIDATES):
+                        t_val = value
+                    if txt_val is None and any(cand in key_l for cand in _TEXT_COL_CANDIDATES):
+                        txt_val = value
+                if t_val is not None or txt_val is not None:
+                    rows.append({"t_raw": t_val, "texte_raw": txt_val})
+    if not rows:
+        return pd.DataFrame(columns=["t_raw", "texte_raw"])
+    return pd.DataFrame(rows)
+
+
+def charger_timestamps_depuis_fichier(file_bytes: bytes, filename: str | None = None) -> pd.DataFrame:
+    """
+    Interprète un fichier de timestamps (CSV/TSV/JSON/texte) et renvoie un DataFrame [t_sec, texte_sec].
+    La seconde est arrondie à l'entier inférieur (1 Hz) et les textes vides sont filtrés.
+    """
+    if not file_bytes:
+        return pd.DataFrame(columns=["t_sec", "texte_sec"])
+
+    try:
+        raw = file_bytes.decode("utf-8")
+    except Exception:
+        raw = file_bytes.decode("latin-1", errors="ignore")
+    if not raw.strip():
+        return pd.DataFrame(columns=["t_sec", "texte_sec"])
+
+    # tentative JSON
+    df_candidates: list[pd.DataFrame] = []
+    try:
+        payload = json.loads(raw)
+        df_json = _df_from_json_payload(payload)
+        if not df_json.empty:
+            df_candidates.append(df_json)
+    except Exception:
+        pass
+
+    # tentative CSV/TSV (détection auto du séparateur)
+    buf = io.StringIO(raw)
+    try:
+        df_csv = pd.read_csv(buf, sep=None, engine="python")
+        if not df_csv.empty:
+            df_candidates.append(df_csv)
+    except Exception:
+        for sep in [";", "\t", "|", ","]:
+            buf.seek(0)
+            try:
+                df_sep = pd.read_csv(buf, sep=sep)
+                if not df_sep.empty:
+                    df_candidates.append(df_sep)
+                    break
+            except Exception:
+                continue
+
+    if not df_candidates:
+        return pd.DataFrame(columns=["t_sec", "texte_sec"])
+
+    for df in df_candidates:
+        if df is None or df.empty:
+            continue
+        cols = list(df.columns)
+        time_col = _select_column(cols, _TIME_COL_CANDIDATES)
+        text_col = _select_column(cols, _TEXT_COL_CANDIDATES)
+        if time_col is None or text_col is None:
+            continue
+        tmp = df[[time_col, text_col]].rename(columns={time_col: "t_raw", text_col: "texte_raw"}).copy()
+        tmp["t_sec"] = tmp["t_raw"].apply(_to_seconds_generic)
+        tmp["texte_sec"] = tmp["texte_raw"].astype(str).str.strip()
+        tmp = tmp.dropna(subset=["t_sec"])
+        if tmp.empty:
+            continue
+        tmp["t_sec"] = tmp["t_sec"].apply(lambda x: int(math.floor(float(x))))
+        tmp = tmp[tmp["texte_sec"].astype(str).str.strip() != ""]
+        if tmp.empty:
+            continue
+        agg = (
+            tmp.groupby("t_sec")["texte_sec"]
+            .apply(lambda s: " ".join([str(v).strip() for v in s if str(v).strip()]))
+            .reset_index()
+        )
+        agg["t_sec"] = agg["t_sec"].astype("Int64")
+        return agg.sort_values("t_sec").reset_index(drop=True)
+
+    return pd.DataFrame(columns=["t_sec", "texte_sec"])
