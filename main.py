@@ -30,6 +30,7 @@ from dictionnaire import (
 )
 from tests import ui_tests_auto, ui_tests_croises
 from attitudes import calculer_attitudes_depuis_images, ui_attitudes_images
+from emotions import ui_emotions_images
 from images import ui_images
 
 # whisper optionnel
@@ -429,6 +430,7 @@ for k in [
     "df_align_sec",
     "df_align_mots",
     "df_attitudes",
+    "df_emotions",
     "texts_map",
     "texte_corrige_global",
 ]:
@@ -451,8 +453,15 @@ for k in [
             else ({} if k in ["images_store_map", "texts_map"] else [])
         )
 
-tab_data, tab_analyse, tab_tests, tab_attitudes, tab_legend = st.tabs(
-    ["1. Données", "2. Analyse", "3. Tests croisés", "4. Attitudes", "Légendes"]
+tab_data, tab_analyse, tab_tests, tab_attitudes, tab_emotions, tab_legend = st.tabs(
+    [
+        "1. Données",
+        "2. Analyse",
+        "3. Tests croisés",
+        "4. Attitudes",
+        "5. Émotions",
+        "Légendes",
+    ]
 )
 
 with st.sidebar:
@@ -790,6 +799,13 @@ with tab_attitudes:
                 st.warning(f"Affichage attitudes: {e}")
         else:
             st.caption("Aucune mesure d’attitudes calculée.")
+
+with tab_emotions:
+    df_images = st.session_state.get("df_images")
+    try:
+        ui_emotions_images(df_images)
+    except Exception as e:
+        st.error(f"Erreur interface émotions : {e}")
 
 with tab_legend:
     afficher_legendes()
