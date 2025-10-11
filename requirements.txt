@@ -1,0 +1,11 @@
+altair
+faster-whisper
+librosa
+mediapipe
+numpy
+pandas
+Pillow
+scipy
+soundfile
+spacy[transformers]
+streamlit
