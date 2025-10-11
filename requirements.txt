@@ -1,5 +1,6 @@
 altair
 faster-whisper
+fer
 librosa
 mediapipe
 numpy
