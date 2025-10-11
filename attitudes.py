@@ -9,11 +9,18 @@
 
 import io
 import math
+import os
 import numpy as np
 import pandas as pd
 import streamlit as st
 from PIL import Image
 import altair as alt
+
+# Forcer MediaPipe à fonctionner en mode CPU : certaines plateformes (macOS
+# sans contexte graphique, environnements headless, etc.) ne peuvent pas
+# initialiser l'OpenGL requis par les graphes GPU. L'environnement
+# MEDIAPIPE_DISABLE_GPU désactive la dépendance au service GPU.
+os.environ.setdefault("MEDIAPIPE_DISABLE_GPU", "1")
 
 # chargement optionnel de mediapipe
 try:
