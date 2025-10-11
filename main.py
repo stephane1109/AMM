@@ -14,7 +14,7 @@ import altair as alt
 import spacy
 import librosa
 
-from timestamp import construire_df_timestamps_pour_fichier
+from timestamp import construire_df_timestamps_pour_fichier, charger_timestamps_depuis_fichier
 from definitions import obtenir_definitions, obtenir_glossaire, afficher_legendes
 from dictionnaire import (
     deictiques_proches,
@@ -428,6 +428,12 @@ with st.sidebar:
     use_whisper = st.checkbox("Transcrire l’audio avec Whisper (si installé)", value=False)
     fichiers_txt = st.file_uploader("Fichiers texte (.txt)", type=["txt"], accept_multiple_files=True)
     fichiers_audio = st.file_uploader("Fichiers audio (.wav, .mp3)", type=["wav", "mp3"], accept_multiple_files=True)
+    fichier_timestamps = st.file_uploader(
+        "Fichier timestamps (texte aligné)",
+        type=["csv", "tsv", "txt", "json"],
+        accept_multiple_files=False,
+        help="Colonnes attendues : temps (s, mm:ss ou hh:mm:ss) et texte."
+    )
     st.divider()
     st.caption("Images synchronisées (1 fps strict) : i_12s_1fps.jpg")
     decalage_global_s = st.number_input("Décalage global images (s)", value=0.0, step=0.1, format="%.2f")
@@ -438,6 +444,7 @@ if lancer:
     with tab_data:
         st.subheader("Texte – Documents et segments (phrases)")
         docs_rows, segments_txt_rows = [], []
+        df_align_sec_uploaded = None
         if fichiers_txt:
             if nlp is None:
                 st.error("Aucun modèle spaCy utilisable. Installez fr_dep_news_trf.")
@@ -514,6 +521,20 @@ if lancer:
                 plots_audio.append((f.name, df_ts, df_pauses, df_debit_sec, df_parole_pause_sec))
 
         texte_corrige = st.session_state.get("texte_corrige_global", "")
+        if fichier_timestamps is not None:
+            try:
+                df_align_sec_uploaded = charger_timestamps_depuis_fichier(
+                    fichier_timestamps.getvalue(), filename=fichier_timestamps.name
+                )
+            except Exception as e:
+                st.warning(f"{fichier_timestamps.name} : lecture timestamps impossible ({e})")
+                df_align_sec_uploaded = pd.DataFrame(columns=["t_sec", "texte_sec"])
+            else:
+                if df_align_sec_uploaded is not None and not df_align_sec_uploaded.empty:
+                    st.success(f"{fichier_timestamps.name} : {len(df_align_sec_uploaded)} seconde(s) de texte importées.")
+                    st.session_state["df_align_sec"] = df_align_sec_uploaded.copy()
+                else:
+                    st.warning(f"{fichier_timestamps.name} : aucun timestamp exploitable trouvé.")
         if use_whisper and segs_all and texte_corrige and nlp is not None:
             df_align = construire_df_timestamps_pour_fichier(
                 texte_corrige=texte_corrige,
@@ -553,7 +574,13 @@ if lancer:
                                               .rename(columns={"texte_piece":"texte_sec"}))
             if df_align_sec is None:
                 df_align_sec = pd.DataFrame(columns=["t_sec","texte_sec"])
-            st.session_state["df_align_sec"] = df_align_sec.copy()
+            if df_align_sec_uploaded is not None and not df_align_sec_uploaded.empty:
+                st.info("Timestamps Whisper calculés mais remplacés par le fichier importé.")
+            else:
+                st.session_state["df_align_sec"] = df_align_sec.copy()
+
+        if st.session_state.get("df_align_sec") is None:
+            st.session_state["df_align_sec"] = pd.DataFrame(columns=["t_sec", "texte_sec"])
 
         if audio_rows:
             df_audio = pd.DataFrame(audio_rows)
@@ -612,11 +639,14 @@ with tab_analyse:
             texte_map = {}
             if df_align_sec is not None and not df_align_sec.empty:
                 for _, r in df_align_sec.iterrows():
-                    if pd.notna(r.get("t_sec")):
-                        try:
-                            texte_map[int(r["t_sec"])] = r.get("texte_sec", "")
-                        except Exception:
-                            continue
+                    t_val = r.get("t_sec")
+                    if pd.isna(t_val):
+                        continue
+                    try:
+                        t_key = int(t_val)
+                    except Exception:
+                        continue
+                    texte_map[t_key] = r.get("texte_sec", "")
 
             if not sel.empty:
                 ncols = 5
@@ -657,29 +687,42 @@ with tab_attitudes:
     if df_images is None or df_images.empty:
         st.info("Importez d’abord des images (i_{N}s_1fps.jpg).")
     else:
-        norm_map = {}
-        if isinstance(images_store_map, dict) and images_store_map:
-            norm_map = {str(k): v for k, v in images_store_map.items()}
-        elif isinstance(images_store_list, list) and images_store_list:
+        store_norm = []
+        if isinstance(images_store_list, list) and images_store_list:
             for it in images_store_list:
-                if isinstance(it, dict) and "name" in it and "bytes" in it:
-                    norm_map[str(it["name"])] = it["bytes"]
+                if isinstance(it, dict):
+                    nom = it.get("name")
+                    bts = it.get("bytes")
+                    if nom is None or bts is None:
+                        continue
+                    try:
+                        store_norm.append({"name": str(nom), "bytes": bytes(bts)})
+                    except Exception:
+                        continue
                 elif isinstance(it, (list, tuple)) and len(it) == 2:
                     nom, bts = it
-                    norm_map[str(nom)] = bts
-                elif isinstance(it, str):
+                    try:
+                        store_norm.append({"name": str(nom), "bytes": bytes(bts)})
+                    except Exception:
+                        continue
+        if not store_norm and isinstance(images_store_map, dict) and images_store_map:
+            for nom, bts in images_store_map.items():
+                try:
+                    store_norm.append({"name": str(nom), "bytes": bytes(bts)})
+                except Exception:
                     continue
 
         try:
-            df_att = calculer_attitudes_depuis_images(df_images, norm_map)
+            df_att_images, df_att_agrege = calculer_attitudes_depuis_images(store_norm)
         except Exception as e:
             st.error(f"Erreur attitudes: {e}")
-            df_att = pd.DataFrame(columns=["fichier_image","t_image"])
+            df_att_images = pd.DataFrame(columns=["fichier_image", "t_image"])
+            df_att_agrege = pd.DataFrame()
 
-        if isinstance(df_att, pd.DataFrame) and not df_att.empty:
-            st.session_state["df_attitudes"] = df_att.copy()
+        if isinstance(df_att_images, pd.DataFrame) and not df_att_images.empty:
+            st.session_state["df_attitudes"] = df_att_images.copy()
             try:
-                ui_attitudes_images(df_att)
+                ui_attitudes_images(df_att_images, df_att_agrege)
             except Exception as e:
                 st.warning(f"Affichage attitudes: {e}")
         else:
