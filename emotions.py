@@ -258,7 +258,12 @@ def _annoter_image(image_bytes: bytes, detections: list[dict[str, Any]]) -> Imag
         emotion = det.get("emotion_predite", "")
         score = float(det.get("score", 0.0))
         texte = f"{emotion} ({score:.2f})"
-        text_width, text_height = draw.textsize(texte, font=font)
+        if hasattr(draw, "textbbox"):
+            bbox_texte = draw.textbbox((0, 0), texte, font=font)
+            text_width = bbox_texte[2] - bbox_texte[0]
+            text_height = bbox_texte[3] - bbox_texte[1]
+        else:  # Compatibilité avec les versions plus anciennes de Pillow
+            text_width, text_height = draw.textsize(texte, font=font)
         text_x = x
         text_y = max(0, y - text_height - 6)
         draw.rectangle(
