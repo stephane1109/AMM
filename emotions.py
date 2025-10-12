@@ -12,22 +12,26 @@ import streamlit as st
 from PIL import Image
 
 # Détection optionnelle avec le modèle FER (Facial Emotion Recognition).
+_FER_IMPORT_ERROR = ""
+
 try:  # pragma: no cover - dépendance optionnelle
     from fer import FER  # type: ignore
 
     _FER_DISPONIBLE = True
-except Exception:  # pragma: no cover - dépendance optionnelle
+except Exception as exc:  # pragma: no cover - dépendance optionnelle
     FER = None  # type: ignore
     _FER_DISPONIBLE = False
+    _FER_IMPORT_ERROR = str(exc)
 
 
 @st.cache_resource(show_spinner=False)
 def charger_modele_emotions() -> tuple[Any | None, str]:
     """Instancie le détecteur FER si disponible."""
     if not _FER_DISPONIBLE:
+        details = f" Détail de l'erreur : {_FER_IMPORT_ERROR}" if _FER_IMPORT_ERROR else ""
         return None, (
-            "Le paquet `fer` n'est pas installé. Installez-le avec `pip install fer` pour activer la"
-            " détection d'émotions."
+            "Le paquet `fer` n'est pas installé ou a échoué au chargement. Installez-le avec"
+            " `pip install fer` puis redémarrez l'application pour activer la détection d'émotions." + details
         )
     try:
         detector = FER()
@@ -87,6 +91,11 @@ def ui_emotions_images(df_images: pd.DataFrame | None) -> None:
 
     detector, message_modele = charger_modele_emotions()
     st.caption(message_modele)
+    st.write(
+        "Cette analyse s'appuie exclusivement sur les images importées dans l'onglet « 1. Données »."
+        " Chaque fichier sélectionné est transmis au modèle FER qui détecte les visages et associe"
+        " une émotion dominante à chacun."
+    )
 
     images_store = st.session_state.get("images_store", []) or []
     if not images_store:
