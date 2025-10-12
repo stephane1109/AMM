@@ -234,6 +234,23 @@ def _analyser_image(detector: Any, image_bytes: bytes) -> list[dict[str, Any]]:
     return sorties
 
 
+def _mesurer_texte(draw: ImageDraw.ImageDraw, texte: str, font: ImageFont.ImageFont) -> tuple[int, int]:
+    """Calcule la largeur et la hauteur d'un texte en s'adaptant à Pillow."""
+
+    try:
+        bbox = draw.textbbox((0, 0), texte, font=font)
+    except AttributeError:  # Pillow < 8.0 ou primitives limitées
+        try:
+            bbox = font.getbbox(texte)  # type: ignore[attr-defined]
+        except AttributeError:
+            try:
+                return font.getsize(texte)  # type: ignore[attr-defined]
+            except AttributeError:  # pragma: no cover - scénario très improbable
+                return len(texte) * 6, 11
+
+    return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+
 def _annoter_image(image_bytes: bytes, detections: list[dict[str, Any]]) -> Image.Image:
     """Dessine un cadre vert et un label sur les visages détectés."""
 
@@ -258,7 +275,7 @@ def _annoter_image(image_bytes: bytes, detections: list[dict[str, Any]]) -> Imag
         emotion = det.get("emotion_predite", "")
         score = float(det.get("score", 0.0))
         texte = f"{emotion} ({score:.2f})"
-        text_width, text_height = draw.textsize(texte, font=font)
+        text_width, text_height = _mesurer_texte(draw, texte, font)
         text_x = x
         text_y = max(0, y - text_height - 6)
         draw.rectangle(
