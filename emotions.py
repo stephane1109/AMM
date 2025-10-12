@@ -43,49 +43,150 @@ except Exception as exc:  # pragma: no cover - dépendance optionnelle
     _MOVIEPY_IMPORT_ERROR = str(exc)
 
 
+class _Cv2EmotionDetector:
+    """Détecteur d'émotions de secours basé sur OpenCV.
+
+    Cette implémentation s'appuie sur des cascades de Haar pour détecter les visages
+    et les sourires. Elle fournit une estimation grossière de l'émotion dominante :
+    « heureux » si un sourire est détecté, sinon « neutre ». Ce détecteur permet de
+    proposer une analyse minimale lorsque `fer` n'est pas disponible.
+    """
+
+    def __init__(self) -> None:
+        if cv2 is None:
+            raise RuntimeError("OpenCV n'est pas disponible dans l'environnement courant.")
+
+        base_path = getattr(cv2.data, "haarcascades", "")
+        face_path = base_path + "haarcascade_frontalface_default.xml"
+        smile_path = base_path + "haarcascade_smile.xml"
+
+        self._face_cascade = cv2.CascadeClassifier(face_path)
+        self._smile_cascade = cv2.CascadeClassifier(smile_path)
+
+        if self._face_cascade.empty():
+            raise RuntimeError(
+                "Impossible de charger le classifieur de visages OpenCV (haarcascade_frontalface_default)."
+            )
+        if self._smile_cascade.empty():
+            raise RuntimeError(
+                "Impossible de charger le classifieur de sourires OpenCV (haarcascade_smile)."
+            )
+
+    def detect_emotions(self, image: np.ndarray) -> list[dict[str, Any]]:  # pragma: no cover - dépendance optionnelle
+        if image is None or image.size == 0:
+            return []
+
+        if image.ndim == 2:
+            gray = image
+        else:
+            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+
+        gray = cv2.equalizeHist(gray)
+
+        faces = self._face_cascade.detectMultiScale(
+            gray,
+            scaleFactor=1.2,
+            minNeighbors=6,
+            minSize=(32, 32),
+        )
+
+        resultats: list[dict[str, Any]] = []
+        for (x, y, w, h) in faces:
+            roi_gray = gray[y : y + h, x : x + w]
+            smiles = self._smile_cascade.detectMultiScale(
+                roi_gray,
+                scaleFactor=1.7,
+                minNeighbors=22,
+                minSize=(15, 15),
+            )
+
+            a_sourire = len(smiles) > 0
+            if a_sourire:
+                scores = {"heureux": 0.9, "neutre": 0.1, "triste": 0.0}
+            else:
+                scores = {"heureux": 0.1, "neutre": 0.7, "triste": 0.2}
+
+            resultats.append(
+                {
+                    "box": [int(x), int(y), int(w), int(h)],
+                    "emotions": scores,
+                }
+            )
+
+        return resultats
+
+
+def _message_erreur_fer() -> str:
+    """Construit un message d'aide en cas d'échec de l'import du paquet FER."""
+
+    message = (
+        "Le paquet `fer` n'est pas installé ou a échoué au chargement. Installez-le avec"
+        " `pip install fer` puis redémarrez l'application pour activer la détection d'émotions."
+    )
+    if not _FER_IMPORT_ERROR:
+        return message
+
+    if "moviepy" in _FER_IMPORT_ERROR.lower():
+        message += (
+            " Le paquet `moviepy` est également requis par `fer`. Installez-le avec"
+            " `pip install moviepy`."
+        )
+        if not _MOVIEPY_DISPONIBLE:
+            details = " (aucun module `moviepy.editor` détecté dans l'environnement courant.)"
+        else:
+            details = " (module `moviepy` détecté mais `fer` ne parvient toujours pas à l'utiliser.)"
+        message += details
+        message += (
+            " Vérifiez que vous utilisez le même environnement Python pour Streamlit et la"
+            " commande d'installation (`python -m pip install moviepy`). Vous pouvez"
+            " contrôler cela avec `python -m pip show moviepy` ou `pip show moviepy`."
+            " En dernier recours, réinstallez avec `python -m pip install --upgrade --force-reinstall"
+            " moviepy` puis redémarrez l'application."
+        )
+
+    message += f" Détail de l'erreur : {_FER_IMPORT_ERROR}"
+    return message
+
+
 @st.cache_resource(show_spinner=False)
 def charger_modele_emotions() -> tuple[Any | None, str]:
-    """Instancie le détecteur FER si disponible."""
-    if not _FER_DISPONIBLE:
-        message = (
-            "Le paquet `fer` n'est pas installé ou a échoué au chargement. Installez-le avec"
-            " `pip install fer` puis redémarrez l'application pour activer la détection d'émotions."
-        )
-        if _FER_IMPORT_ERROR:
-            if "moviepy" in _FER_IMPORT_ERROR.lower():
-                message += (
-                    " Le paquet `moviepy` est également requis par `fer`. Installez-le avec"
-                    " `pip install moviepy`."
-                )
-                if not _MOVIEPY_DISPONIBLE:
-                    details = (
-                        " (aucun module `moviepy.editor` détecté dans l'environnement courant.)"
-                    )
-                else:
-                    details = (
-                        " (module `moviepy` détecté mais `fer` ne parvient toujours pas à l'utiliser.)"
-                    )
-                message += details
-                message += (
-                    " Vérifiez que vous utilisez le même environnement Python pour Streamlit et la"
-                    " commande d'installation (`python -m pip install moviepy`). Vous pouvez"
-                    " contrôler cela avec `python -m pip show moviepy` ou `pip show moviepy`."
-                    " En dernier recours, réinstallez avec `python -m pip install --upgrade --force-reinstall"
-                    " moviepy` puis redémarrez l'application."
-                )
-            message += f" Détail de l'erreur : {_FER_IMPORT_ERROR}"
-        return None, message
-    if not _CV2_DISPONIBLE:
+    """Instancie un détecteur d'émotions."""
+
+    messages: list[str] = []
+
+    if _FER_DISPONIBLE:
+        try:
+            detector = FER()
+        except Exception as exc:  # pragma: no cover - dépendance optionnelle
+            messages.append(f"Échec de l'initialisation du modèle FER : {exc}")
+        else:
+            return detector, "Modèle FER initialisé (architecture CNN pré-entraînée sur FER2013)."
+    else:
+        messages.append(_message_erreur_fer())
+
+    if _CV2_DISPONIBLE:
+        try:
+            detector_cv2 = _Cv2EmotionDetector()
+        except Exception as exc:  # pragma: no cover - dépendance optionnelle
+            messages.append(f"Échec de l'initialisation du détecteur OpenCV : {exc}")
+        else:
+            resume = (
+                "Détecteur simplifié basé sur OpenCV (détection de sourires avec cascades de Haar)."
+            )
+            if messages:
+                resume += " " + " ".join(messages)
+            return detector_cv2, resume
+    else:
         details = f" Détail de l'erreur : {_CV2_IMPORT_ERROR}" if _CV2_IMPORT_ERROR else ""
-        return None, (
-            "Le paquet `opencv-python` est requis par `fer` pour analyser les visages. Installez-le"
+        messages.append(
+            "Le paquet `opencv-python` est requis pour la détection de visages. Installez-le"
             " avec `pip install opencv-python` puis redémarrez l'application." + details
         )
-    try:
-        detector = FER()
-        return detector, "Modèle FER initialisé (architecture CNN pré-entraînée sur FER2013)."
-    except Exception as exc:  # pragma: no cover - dépendance optionnelle
-        return None, f"Échec de l'initialisation du modèle FER : {exc}"
+
+    if not messages:
+        messages.append("Aucun détecteur d'émotions n'est disponible dans l'environnement courant.")
+
+    return None, " ".join(messages)
 
 
 def recommander_modele_emotions() -> str:
@@ -141,8 +242,8 @@ def ui_emotions_images(df_images: pd.DataFrame | None) -> None:
     st.caption(message_modele)
     st.write(
         "Cette analyse s'appuie exclusivement sur les images importées dans l'onglet « 1. Données »."
-        " Chaque fichier sélectionné est transmis au modèle FER qui détecte les visages et associe"
-        " une émotion dominante à chacun."
+        " Chaque fichier sélectionné est transmis au détecteur disponible (FER ou module OpenCV) qui"
+        " identifie les visages et attribue une émotion dominante à chacun."
     )
 
     images_store = st.session_state.get("images_store", []) or []
@@ -152,8 +253,8 @@ def ui_emotions_images(df_images: pd.DataFrame | None) -> None:
 
     if detector is None:
         st.warning(
-            "Le modèle de détection n'est pas disponible. Installez `fer` puis relancez l'application"
-            " pour activer cette section."
+            "Le modèle de détection n'est pas disponible. Installez `fer` ou assurez-vous que"
+            " `opencv-python` est présent puis relancez l'application pour activer cette section."
         )
         return
 
