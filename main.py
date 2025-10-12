@@ -486,6 +486,13 @@ with st.sidebar:
     st.divider()
     st.caption("Images synchronisées (1 fps strict) : i_12s_1fps.jpg")
     decalage_global_s = st.number_input("Décalage global images (s)", value=0.0, step=0.1, format="%.2f")
+    format_images = st.radio(
+        "Format des images",
+        options=["16:9 (paysage)", "9:16 (portrait)"],
+        index=0,
+        help="Indiquez le format dominant pour adapter la détection des visages.",
+    )
+    st.session_state["images_orientation"] = "9:16" if "9:16" in format_images else "16:9"
     fichiers_images = st.file_uploader("Images (.png, .jpg, .jpeg)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
     lancer = st.button("Lancer l’analyse")
 
@@ -840,8 +847,9 @@ with tab_attitudes:
 
 with tab_emotions:
     df_images = st.session_state.get("df_images")
+    orientation_images = st.session_state.get("images_orientation")
     try:
-        ui_emotions_images(df_images)
+        ui_emotions_images(df_images, orientation_images=orientation_images)
     except Exception as e:
         st.error(f"Erreur interface émotions : {e}")
 

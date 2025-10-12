@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from typing import Any
 
 import numpy as np
@@ -44,6 +45,31 @@ except Exception as exc:  # pragma: no cover - dépendance optionnelle
     _MOVIEPY_IMPORT_ERROR = str(exc)
 
 
+_FACE_CASCADE: "cv2.CascadeClassifier | None" = None
+
+
+def _charger_cascade_visage() -> "cv2.CascadeClassifier | None":
+    """Charge et met en cache le détecteur de visages Haar d'OpenCV."""
+
+    global _FACE_CASCADE
+
+    if not _CV2_DISPONIBLE:
+        return None
+
+    if _FACE_CASCADE is not None:
+        return _FACE_CASCADE
+
+    base_path = getattr(cv2.data, "haarcascades", "")
+    face_path = os.path.join(base_path, "haarcascade_frontalface_default.xml")
+
+    cascade = cv2.CascadeClassifier(face_path)
+    if cascade.empty():
+        return None
+
+    _FACE_CASCADE = cascade
+    return _FACE_CASCADE
+
+
 class _Cv2EmotionDetector:
     """Détecteur d'émotions de secours basé sur OpenCV.
 
@@ -58,11 +84,12 @@ class _Cv2EmotionDetector:
             raise RuntimeError("OpenCV n'est pas disponible dans l'environnement courant.")
 
         base_path = getattr(cv2.data, "haarcascades", "")
-        face_path = base_path + "haarcascade_frontalface_default.xml"
-        smile_path = base_path + "haarcascade_smile.xml"
+        face_path = os.path.join(base_path, "haarcascade_frontalface_default.xml")
+        smile_path = os.path.join(base_path, "haarcascade_smile.xml")
 
         self._face_cascade = cv2.CascadeClassifier(face_path)
         self._smile_cascade = cv2.CascadeClassifier(smile_path)
+        self._orientation: str | None = None
 
         if self._face_cascade.empty():
             raise RuntimeError(
@@ -72,6 +99,11 @@ class _Cv2EmotionDetector:
             raise RuntimeError(
                 "Impossible de charger le classifieur de sourires OpenCV (haarcascade_smile)."
             )
+
+    def set_orientation(self, orientation: str | None) -> None:
+        """Permet d'ajuster dynamiquement les paramètres de détection."""
+
+        self._orientation = orientation
 
     def detect_emotions(self, image: np.ndarray) -> list[dict[str, Any]]:  # pragma: no cover - dépendance optionnelle
         if image is None or image.size == 0:
@@ -84,11 +116,21 @@ class _Cv2EmotionDetector:
 
         gray = cv2.equalizeHist(gray)
 
+        orientation = (self._orientation or "").lower()
+        if orientation in {"portrait", "9:16"}:
+            scale_factor = 1.08
+            min_neighbors = 5
+            min_size = (30, 30)
+        else:
+            scale_factor = 1.15
+            min_neighbors = 6
+            min_size = (40, 40)
+
         faces = self._face_cascade.detectMultiScale(
             gray,
-            scaleFactor=1.2,
-            minNeighbors=6,
-            minSize=(32, 32),
+            scaleFactor=scale_factor,
+            minNeighbors=min_neighbors,
+            minSize=min_size,
         )
 
         resultats: list[dict[str, Any]] = []
@@ -286,7 +328,90 @@ def _centrer_carre(
     return nouveau_x1, nouveau_y1, nouveau_x2, nouveau_y2
 
 
-def _analyser_image(detector: Any, image_bytes: bytes) -> list[dict[str, Any]]:
+def _calculer_iou(b1: tuple[int, int, int, int], b2: tuple[int, int, int, int]) -> float:
+    """Calcule l'Intersection over Union entre deux boîtes englobantes."""
+
+    x1 = max(b1[0], b2[0])
+    y1 = max(b1[1], b2[1])
+    x2 = min(b1[2], b2[2])
+    y2 = min(b1[3], b2[3])
+
+    inter_largeur = max(0, x2 - x1)
+    inter_hauteur = max(0, y2 - y1)
+    inter = inter_largeur * inter_hauteur
+
+    if inter == 0:
+        return 0.0
+
+    aire_b1 = max(0, b1[2] - b1[0]) * max(0, b1[3] - b1[1])
+    aire_b2 = max(0, b2[2] - b2[0]) * max(0, b2[3] - b2[1])
+    union = aire_b1 + aire_b2 - inter
+    if union <= 0:
+        return 0.0
+    return inter / union
+
+
+def _detect_faces_cv2(image: np.ndarray, orientation: str | None) -> list[tuple[int, int, int, int]]:
+    """Détecte les visages à l'aide d'OpenCV pour fiabiliser les boîtes."""
+
+    cascade = _charger_cascade_visage()
+    if cascade is None:
+        return []
+
+    if image.ndim == 2:
+        gray = image
+    else:
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+
+    gray = cv2.equalizeHist(gray)
+
+    orientation_norm = (orientation or "").lower()
+    if orientation_norm in {"portrait", "9:16"}:
+        scale_factor = 1.08
+        min_neighbors = 4
+        min_size = (28, 28)
+    else:
+        scale_factor = 1.15
+        min_neighbors = 5
+        min_size = (36, 36)
+
+    faces = cascade.detectMultiScale(
+        gray,
+        scaleFactor=scale_factor,
+        minNeighbors=min_neighbors,
+        minSize=min_size,
+    )
+
+    return [
+        (int(x), int(y), int(x + w), int(y + h))
+        for (x, y, w, h) in faces
+        if w > 0 and h > 0
+    ]
+
+
+def _evaluer_emotions_sur_face(detector: Any, image: np.ndarray) -> dict[str, float]:
+    """Déduit les scores d'émotions sur un extrait de visage."""
+
+    if detector is None:
+        return {}
+
+    try:
+        predictions = detector.detect_emotions(image)
+    except Exception:  # pragma: no cover - dépendance optionnelle
+        return {}
+
+    if not predictions:
+        return {}
+
+    if isinstance(predictions, list) and predictions:
+        premier = predictions[0]
+        emotions = premier.get("emotions") if isinstance(premier, dict) else None
+        return emotions if isinstance(emotions, dict) else {}
+
+    return {}
+
+
+def _analyser_image(detector: Any, image_bytes: bytes, orientation: str | None = None) -> list[dict[str, Any]]:
     """Applique le détecteur sur une image et renvoie une liste de résultats par visage."""
     if detector is None:
         return []
@@ -299,10 +424,19 @@ def _analyser_image(detector: Any, image_bytes: bytes) -> list[dict[str, Any]]:
 
     largeur, hauteur = img.size
     arr = np.array(img)
+
+    if hasattr(detector, "set_orientation"):
+        try:
+            detector.set_orientation(orientation)
+        except Exception:
+            pass
+
     try:
         detections = detector.detect_emotions(arr)
     except Exception:  # pragma: no cover - dépendance optionnelle
-        return []
+        detections = []
+
+    faces_cv2 = _detect_faces_cv2(arr, orientation)
 
     sorties: list[dict[str, Any]] = []
     for resultat in detections or []:
@@ -313,6 +447,18 @@ def _analyser_image(detector: Any, image_bytes: bytes) -> list[dict[str, Any]]:
         x1, y1, x2, y2 = _nettoyer_bbox(resultat.get("box", []), largeur, hauteur)
         if x2 <= x1 or y2 <= y1:
             continue
+
+        meilleure_face_idx = None
+        meilleure_iou = 0.0
+        for idx, face in enumerate(faces_cv2):
+            iou = _calculer_iou((x1, y1, x2, y2), face)
+            if iou > meilleure_iou:
+                meilleure_iou = iou
+                meilleure_face_idx = idx
+
+        if meilleure_face_idx is not None and meilleure_iou >= 0.1:
+            x1, y1, x2, y2 = faces_cv2.pop(meilleure_face_idx)
+
         x1, y1, x2, y2 = _centrer_carre((x1, y1, x2, y2), largeur, hauteur)
         sorties.append(
             {
@@ -322,6 +468,25 @@ def _analyser_image(detector: Any, image_bytes: bytes) -> list[dict[str, Any]]:
                 "bbox": (x1, y1, x2, y2),
             }
         )
+
+    if not sorties and faces_cv2:
+        # Aucune émotion n'a été retournée mais des visages ont été repérés via OpenCV.
+        for idx, face in enumerate(faces_cv2):
+            x1, y1, x2, y2 = _centrer_carre(face, largeur, hauteur)
+            visage = arr[y1:y2, x1:x2]
+            emotions = _evaluer_emotions_sur_face(detector, visage) if visage.size else {}
+            if emotions:
+                emotion_predite, score = max(emotions.items(), key=lambda item: item[1])
+            else:
+                emotion_predite, score = "none", 0.0
+            sorties.append(
+                {
+                    "predicted_emotion": str(emotion_predite),
+                    "score": float(score),
+                    "emotion_scores": emotions or {},
+                    "bbox": (x1, y1, x2, y2),
+                }
+            )
 
     sorties.sort(key=lambda det: _ponderer_detection(det, (largeur, hauteur)), reverse=True)
     for idx, det in enumerate(sorties):
@@ -387,7 +552,7 @@ def _annoter_image(image_bytes: bytes, detections: list[dict[str, Any]]) -> Imag
     return img
 
 
-def ui_emotions_images(df_images: pd.DataFrame | None) -> None:
+def ui_emotions_images(df_images: pd.DataFrame | None, orientation_images: str | None = None) -> None:
     """Streamlit interface that runs emotion analysis on imported still images."""
 
     st.subheader("Analyse des émotions (images synchronisées)")
@@ -439,7 +604,7 @@ def ui_emotions_images(df_images: pd.DataFrame | None) -> None:
             if bytes_img is None:
                 continue
 
-            detections = _analyser_image(detector, bytes_img)
+            detections = _analyser_image(detector, bytes_img, orientation=orientation_images)
             if not detections:
                 resultats.append(
                     {
