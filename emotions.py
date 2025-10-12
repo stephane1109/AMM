@@ -14,6 +14,7 @@ from PIL import Image
 # Détection optionnelle avec le modèle FER (Facial Emotion Recognition).
 _FER_IMPORT_ERROR = ""
 _CV2_IMPORT_ERROR = ""
+_MOVIEPY_IMPORT_ERROR = ""
 
 try:  # pragma: no cover - dépendance optionnelle
     import cv2  # type: ignore
@@ -33,6 +34,14 @@ except Exception as exc:  # pragma: no cover - dépendance optionnelle
     _FER_DISPONIBLE = False
     _FER_IMPORT_ERROR = str(exc)
 
+try:  # pragma: no cover - dépendance optionnelle
+    import importlib.util as _importlib_util
+
+    _MOVIEPY_DISPONIBLE = _importlib_util.find_spec("moviepy.editor") is not None
+except Exception as exc:  # pragma: no cover - dépendance optionnelle
+    _MOVIEPY_DISPONIBLE = False
+    _MOVIEPY_IMPORT_ERROR = str(exc)
+
 
 @st.cache_resource(show_spinner=False)
 def charger_modele_emotions() -> tuple[Any | None, str]:
@@ -47,6 +56,22 @@ def charger_modele_emotions() -> tuple[Any | None, str]:
                 message += (
                     " Le paquet `moviepy` est également requis par `fer`. Installez-le avec"
                     " `pip install moviepy`."
+                )
+                if not _MOVIEPY_DISPONIBLE:
+                    details = (
+                        " (aucun module `moviepy.editor` détecté dans l'environnement courant.)"
+                    )
+                else:
+                    details = (
+                        " (module `moviepy` détecté mais `fer` ne parvient toujours pas à l'utiliser.)"
+                    )
+                message += details
+                message += (
+                    " Vérifiez que vous utilisez le même environnement Python pour Streamlit et la"
+                    " commande d'installation (`python -m pip install moviepy`). Vous pouvez"
+                    " contrôler cela avec `python -m pip show moviepy` ou `pip show moviepy`."
+                    " En dernier recours, réinstallez avec `python -m pip install --upgrade --force-reinstall"
+                    " moviepy` puis redémarrez l'application."
                 )
             message += f" Détail de l'erreur : {_FER_IMPORT_ERROR}"
         return None, message
