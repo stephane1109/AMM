@@ -122,7 +122,7 @@ def _preparer_df_frames(
 ) -> tuple[pd.DataFrame, list[str]]:
     """Prépare le tableau par image avec les scores émotionnels moyens."""
 
-    if df_emotions is None or df_emotions.empty:
+    if not isinstance(df_emotions, pd.DataFrame) or df_emotions.empty:
         return pd.DataFrame(), []
 
     df = df_emotions.copy()
@@ -262,6 +262,12 @@ def ui_vecteur_emotionnel() -> None:
     )
 
     df_emotions = st.session_state.get("df_emotions")
+    if not isinstance(df_emotions, pd.DataFrame):
+        try:
+            df_emotions = pd.DataFrame(df_emotions)
+        except Exception:
+            df_emotions = None
+
     if df_emotions is None or df_emotions.empty:
         st.info(
             "Aucun résultat d'émotions n'est disponible. Rendez-vous dans l'onglet « 6. Émotions » pour lancer la "
@@ -270,6 +276,11 @@ def ui_vecteur_emotionnel() -> None:
         return
 
     df_images = st.session_state.get("df_images")
+    if not isinstance(df_images, pd.DataFrame):
+        try:
+            df_images = pd.DataFrame(df_images)
+        except Exception:
+            df_images = None
     texte_map = _texte_par_seconde()
 
     df_frames, emotions = _preparer_df_frames(df_emotions, df_images, texte_map)
