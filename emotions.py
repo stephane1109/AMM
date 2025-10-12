@@ -38,11 +38,18 @@ except Exception as exc:  # pragma: no cover - dépendance optionnelle
 def charger_modele_emotions() -> tuple[Any | None, str]:
     """Instancie le détecteur FER si disponible."""
     if not _FER_DISPONIBLE:
-        details = f" Détail de l'erreur : {_FER_IMPORT_ERROR}" if _FER_IMPORT_ERROR else ""
-        return None, (
+        message = (
             "Le paquet `fer` n'est pas installé ou a échoué au chargement. Installez-le avec"
-            " `pip install fer` puis redémarrez l'application pour activer la détection d'émotions." + details
+            " `pip install fer` puis redémarrez l'application pour activer la détection d'émotions."
         )
+        if _FER_IMPORT_ERROR:
+            if "moviepy" in _FER_IMPORT_ERROR.lower():
+                message += (
+                    " Le paquet `moviepy` est également requis par `fer`. Installez-le avec"
+                    " `pip install moviepy`."
+                )
+            message += f" Détail de l'erreur : {_FER_IMPORT_ERROR}"
+        return None, message
     if not _CV2_DISPONIBLE:
         details = f" Détail de l'erreur : {_CV2_IMPORT_ERROR}" if _CV2_IMPORT_ERROR else ""
         return None, (
