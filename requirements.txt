@@ -1,6 +1,7 @@
 altair
 faster-whisper
 fer
+opencv-python
 librosa
 mediapipe
 numpy
