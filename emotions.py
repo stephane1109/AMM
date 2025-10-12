@@ -9,7 +9,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import streamlit as st
-from PIL import Image
+import altair as alt
+from PIL import Image, ImageDraw, ImageFont
 
 # Détection optionnelle avec le modèle FER (Facial Emotion Recognition).
 _FER_IMPORT_ERROR = ""
@@ -233,6 +234,42 @@ def _analyser_image(detector: Any, image_bytes: bytes) -> list[dict[str, Any]]:
     return sorties
 
 
+def _annoter_image(image_bytes: bytes, detections: list[dict[str, Any]]) -> Image.Image:
+    """Dessine un cadre vert et un label sur les visages détectés."""
+
+    try:
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    except Exception:
+        return Image.new("RGB", (200, 200), color="black")
+
+    if not detections:
+        return img
+
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.load_default()
+
+    for det in detections:
+        bbox = det.get("bbox", [])
+        if not bbox or len(bbox) != 4:
+            continue
+        x, y, w, h = [int(float(v)) for v in bbox]
+        draw.rectangle([(x, y), (x + w, y + h)], outline="green", width=3)
+
+        emotion = det.get("emotion_predite", "")
+        score = float(det.get("score", 0.0))
+        texte = f"{emotion} ({score:.2f})"
+        text_width, text_height = draw.textsize(texte, font=font)
+        text_x = x
+        text_y = max(0, y - text_height - 6)
+        draw.rectangle(
+            [(text_x, text_y), (text_x + text_width + 6, text_y + text_height + 4)],
+            fill=(0, 128, 0),
+        )
+        draw.text((text_x + 3, text_y + 2), texte, fill="white", font=font)
+
+    return img
+
+
 def ui_emotions_images(df_images: pd.DataFrame | None) -> None:
     """Interface Streamlit pour lancer la détection d'émotions sur les images importées."""
     st.subheader("Détection d'émotions (images synchronisées)")
@@ -263,63 +300,70 @@ def ui_emotions_images(df_images: pd.DataFrame | None) -> None:
         st.info("Aucune image valide n'est disponible dans la session.")
         return
 
-    default_selection = noms_images[: min(12, len(noms_images))]
-    selection = st.multiselect(
-        "Images à analyser",
-        options=noms_images,
-        default=default_selection,
-        help="Sélectionnez un sous-ensemble si vous disposez de nombreuses images.",
+    st.info(
+        "Toutes les images importées sont analysées automatiquement afin d'assurer une couverture"
+        " complète des détections."
     )
 
-    if not selection:
-        st.info("Sélectionnez au moins une image pour lancer l'analyse.")
-        return
-
-    lancer = st.button("Analyser les émotions sur la sélection")
-    if not lancer:
-        return
-
     resultats: list[dict[str, Any]] = []
+    images_annotes: list[dict[str, Any]] = []
     df_images = df_images if isinstance(df_images, pd.DataFrame) else pd.DataFrame()
+    ordre_images = {nom: idx for idx, nom in enumerate(noms_images)}
 
-    for nom in selection:
-        bytes_img = None
-        for item in images_store:
-            if isinstance(item, dict) and item.get("name") == nom:
-                bytes_img = item.get("bytes")
-                break
-        if bytes_img is None:
-            continue
+    with st.spinner("Analyse des émotions en cours..."):
+        for nom in noms_images:
+            bytes_img = None
+            for item in images_store:
+                if isinstance(item, dict) and item.get("name") == nom:
+                    bytes_img = item.get("bytes")
+                    break
+            if bytes_img is None:
+                continue
 
-        detections = _analyser_image(detector, bytes_img)
-        if not detections:
-            resultats.append(
+            detections = _analyser_image(detector, bytes_img)
+            if not detections:
+                resultats.append(
+                    {
+                        "fichier_image": nom,
+                        "t_image": _recuperer_timestamp(df_images, nom),
+                        "face_id": np.nan,
+                        "emotion_predite": "aucune",
+                        "score": 0.0,
+                        "scores_emotions": {},
+                        "bbox": [],
+                    }
+                )
+                images_annotes.append(
+                    {
+                        "fichier_image": nom,
+                        "image": _annoter_image(bytes_img, []),
+                        "detections": [],
+                    }
+                )
+                continue
+
+            images_annotes.append(
                 {
                     "fichier_image": nom,
-                    "t_image": _recuperer_timestamp(df_images, nom),
-                    "face_id": np.nan,
-                    "emotion_predite": "aucune",
-                    "score": 0.0,
-                    "scores_emotions": {},
-                    "bbox": [],
+                    "image": _annoter_image(bytes_img, detections),
+                    "detections": detections,
                 }
             )
-            continue
 
-        for det in detections:
-            ligne = {
-                "fichier_image": nom,
-                "t_image": _recuperer_timestamp(df_images, nom),
-                "face_id": det.get("face_id"),
-                "emotion_predite": det.get("emotion_predite", ""),
-                "score": float(det.get("score", 0.0)),
-                "scores_emotions": det.get("scores_emotions", {}),
-                "bbox": det.get("bbox", []),
-            }
-            resultats.append(ligne)
+            for det in detections:
+                ligne = {
+                    "fichier_image": nom,
+                    "t_image": _recuperer_timestamp(df_images, nom),
+                    "face_id": det.get("face_id"),
+                    "emotion_predite": det.get("emotion_predite", ""),
+                    "score": float(det.get("score", 0.0)),
+                    "scores_emotions": det.get("scores_emotions", {}),
+                    "bbox": det.get("bbox", []),
+                }
+                resultats.append(ligne)
 
     if not resultats:
-        st.warning("Aucun visage ni émotion détectés sur la sélection.")
+        st.warning("Aucun visage ni émotion détectés sur les images importées.")
         return
 
     df_res = pd.DataFrame(resultats)
@@ -353,6 +397,52 @@ def ui_emotions_images(df_images: pd.DataFrame | None) -> None:
         st.info("Aucune émotion dominante n'a été détectée.")
     else:
         st.bar_chart(data=distrib.set_index("emotion"))
+
+    st.markdown("#### Streamgraph des émotions")
+    df_stream = df_res[df_res["emotion_predite"] != "aucune"].copy()
+    if df_stream.empty:
+        st.info("Aucune émotion détectée pour générer le streamgraph.")
+    else:
+        df_stream["ordre_image"] = df_stream["fichier_image"].map(ordre_images).astype(float)
+        if df_stream["t_image"].notna().any():
+            df_stream["axe"] = df_stream["t_image"].fillna(df_stream["ordre_image"])
+            axe_label = "Temps (s)"
+        else:
+            df_stream["axe"] = df_stream["ordre_image"]
+            axe_label = "Ordre des images"
+
+        stream_chart = (
+            alt.Chart(df_stream)
+            .mark_area()
+            .encode(
+                x=alt.X("axe:Q", title=axe_label),
+                y=alt.Y("score:Q", stack="center", title="Score"),
+                color=alt.Color("emotion_predite:N", title="Émotion"),
+                tooltip=[
+                    alt.Tooltip("fichier_image:N", title="Image"),
+                    alt.Tooltip("emotion_predite:N", title="Émotion"),
+                    alt.Tooltip("score:Q", title="Score", format=".2f"),
+                ],
+            )
+            .properties(width="container", height=300)
+        )
+        st.altair_chart(stream_chart, use_container_width=True)
+
+    st.markdown("#### Visualisation des images annotées")
+    for entree in images_annotes:
+        st.image(entree["image"], caption=entree["fichier_image"], use_column_width=True)
+        detections = entree["detections"]
+        if detections:
+            lignes = []
+            for det in detections:
+                face_id = det.get("face_id")
+                face_txt = f"Visage {face_id}" if face_id is not None else "Visage"
+                emotion = det.get("emotion_predite", "")
+                score = float(det.get("score", 0.0))
+                lignes.append(f"- {face_txt} : **{emotion}** (score {score:.2f})")
+            st.markdown("\n".join(lignes))
+        else:
+            st.markdown("- Aucun visage détecté sur cette image.")
 
     st.markdown("#### Export")
     csv = df_res.drop(columns=["scores_emotions"]).to_csv(index=False).encode("utf-8")
