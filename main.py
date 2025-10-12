@@ -31,6 +31,7 @@ from dictionnaire import (
 from tests import ui_tests_auto, ui_tests_croises
 from attitudes import calculer_attitudes_depuis_images, ui_attitudes_images
 from emotions import ui_emotions_images
+from vecteuremo import ui_vecteur_emotionnel
 from images import ui_images
 from anomalies import ui_anomalies
 
@@ -454,7 +455,7 @@ for k in [
             else ({} if k in ["images_store_map", "texts_map"] else [])
         )
 
-tab_data, tab_analyse, tab_anomalies, tab_tests, tab_attitudes, tab_emotions, tab_legend = st.tabs(
+tab_data, tab_analyse, tab_anomalies, tab_tests, tab_attitudes, tab_emotions, tab_vecteuremo, tab_legend = st.tabs(
     [
         "1. Données",
         "2. Analyse",
@@ -462,6 +463,7 @@ tab_data, tab_analyse, tab_anomalies, tab_tests, tab_attitudes, tab_emotions, ta
         "4. Tests croisés",
         "5. Attitudes",
         "6. Émotions",
+        "7. Vecteur émotionnel",
         "Légendes",
     ]
 )
@@ -842,6 +844,12 @@ with tab_emotions:
         ui_emotions_images(df_images)
     except Exception as e:
         st.error(f"Erreur interface émotions : {e}")
+
+with tab_vecteuremo:
+    try:
+        ui_vecteur_emotionnel()
+    except Exception as e:
+        st.error(f"Erreur interface vecteur émotionnel : {e}")
 
 with tab_legend:
     afficher_legendes()
