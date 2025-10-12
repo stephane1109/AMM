@@ -13,6 +13,16 @@ from PIL import Image
 
 # Détection optionnelle avec le modèle FER (Facial Emotion Recognition).
 _FER_IMPORT_ERROR = ""
+_CV2_IMPORT_ERROR = ""
+
+try:  # pragma: no cover - dépendance optionnelle
+    import cv2  # type: ignore
+
+    _CV2_DISPONIBLE = True
+except Exception as exc:  # pragma: no cover - dépendance optionnelle
+    cv2 = None  # type: ignore
+    _CV2_DISPONIBLE = False
+    _CV2_IMPORT_ERROR = str(exc)
 
 try:  # pragma: no cover - dépendance optionnelle
     from fer import FER  # type: ignore
@@ -32,6 +42,12 @@ def charger_modele_emotions() -> tuple[Any | None, str]:
         return None, (
             "Le paquet `fer` n'est pas installé ou a échoué au chargement. Installez-le avec"
             " `pip install fer` puis redémarrez l'application pour activer la détection d'émotions." + details
+        )
+    if not _CV2_DISPONIBLE:
+        details = f" Détail de l'erreur : {_CV2_IMPORT_ERROR}" if _CV2_IMPORT_ERROR else ""
+        return None, (
+            "Le paquet `opencv-python` est requis par `fer` pour analyser les visages. Installez-le"
+            " avec `pip install opencv-python` puis redémarrez l'application." + details
         )
     try:
         detector = FER()
