@@ -13,7 +13,7 @@ import os
 import numpy as np
 import pandas as pd
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageDraw
 import altair as alt
 
 # Forcer MediaPipe à fonctionner en mode CPU : certaines plateformes (macOS
@@ -65,6 +65,41 @@ def _norm_xy(lm, w, h):
     return (float(lm.x * w), float(lm.y * h))
 
 
+def _hand_boxes_from_landmarks(res_hands, w: int, h: int) -> list[tuple[int, int, int, int]]:
+    """Convertit les landmarks de mains MediaPipe en boîtes englobantes pixel."""
+    boxes: list[tuple[int, int, int, int]] = []
+    if not res_hands or not getattr(res_hands, "multi_hand_landmarks", None):
+        return boxes
+    for hand_landmarks in res_hands.multi_hand_landmarks:
+        xs = [lm.x for lm in hand_landmarks.landmark]
+        ys = [lm.y for lm in hand_landmarks.landmark]
+        if not xs or not ys:
+            continue
+        min_x = max(0.0, min(xs)) * w
+        max_x = min(1.0, max(xs)) * w
+        min_y = max(0.0, min(ys)) * h
+        max_y = min(1.0, max(ys)) * h
+        # éviter les boîtes dégénérées
+        if (max_x - min_x) < 1 or (max_y - min_y) < 1:
+            continue
+        boxes.append((int(min_x), int(min_y), int(max_x), int(max_y)))
+    return boxes
+
+
+def _draw_boxes_on_image(
+    img: Image.Image,
+    boxes: list[tuple[int, int, int, int]],
+    color=(0, 255, 0),
+    width: int = 4,
+) -> Image.Image:
+    """Dessine des rectangles de couleur sur une copie de l'image fournie."""
+    annotated = img.copy()
+    draw = ImageDraw.Draw(annotated)
+    for box in boxes:
+        draw.rectangle(box, outline=color, width=width)
+    return annotated
+
+
 # =========================
 # calcul indicateurs (MediaPipe si dispo)
 # =========================
@@ -83,7 +118,8 @@ def _analyser_image_mediapipe(arr_rgb):
         return {"bouche_ouverture": np.nan,
                 "orientation_tete": np.nan,
                 "ouverture_epaules": np.nan,
-                "nb_mains": 0}
+                "nb_mains": 0,
+                "hand_boxes": []}
 
     h, w, _ = arr_rgb.shape
 
@@ -103,6 +139,7 @@ def _analyser_image_mediapipe(arr_rgb):
     orientation_tete = np.nan
     ouverture_epaules = np.nan
     nb_mains = 0
+    hand_boxes: list[tuple[int, int, int, int]] = []
 
     # exécution
     res_face = fm.process(arr_rgb)
@@ -112,8 +149,10 @@ def _analyser_image_mediapipe(arr_rgb):
     # mains
     if res_hands and res_hands.multi_hand_landmarks:
         nb_mains = len(res_hands.multi_hand_landmarks)
+        hand_boxes = _hand_boxes_from_landmarks(res_hands, w, h)
     else:
         nb_mains = 0
+        hand_boxes = []
 
     # visage
     if res_face and res_face.multi_face_landmarks:
@@ -169,7 +208,8 @@ def _analyser_image_mediapipe(arr_rgb):
     return {"bouche_ouverture": bouche_ouverture,
             "orientation_tete": orientation_tete,
             "ouverture_epaules": ouverture_epaules,
-            "nb_mains": int(nb_mains)}
+            "nb_mains": int(nb_mains),
+            "hand_boxes": hand_boxes}
 
 
 # =========================
@@ -226,6 +266,8 @@ def calculer_attitudes_depuis_images(
                 "orientation_tete": np.nan,
                 "ouverture_epaules": np.nan,
                 "nb_mains": 0,
+                "hand_boxes": [],
+                "image_annotee": None,
                 # placeholders OpenFace/OpenPose
                 "au_01": np.nan, "au_02": np.nan, "au_04": np.nan, "au_06": np.nan, "au_12": np.nan,
                 "openpose_ok": False
@@ -239,7 +281,16 @@ def calculer_attitudes_depuis_images(
             feats = _analyser_image_mediapipe(arr)
         else:
             feats = {"bouche_ouverture": np.nan, "orientation_tete": np.nan,
-                     "ouverture_epaules": np.nan, "nb_mains": 0}
+                     "ouverture_epaules": np.nan, "nb_mains": 0, "hand_boxes": []}
+
+        hand_boxes = feats.get("hand_boxes", [])
+        try:
+            annotated_img = _draw_boxes_on_image(img, hand_boxes)
+            buf = io.BytesIO()
+            annotated_img.save(buf, format="PNG")
+            annotated_bytes = buf.getvalue()
+        except Exception:
+            annotated_bytes = None
 
         # OpenFace / OpenPose non exécutés ici (binaire externe requis)
         au_01 = np.nan
@@ -256,6 +307,8 @@ def calculer_attitudes_depuis_images(
             "orientation_tete": feats["orientation_tete"],
             "ouverture_epaules": feats["ouverture_epaules"],
             "nb_mains": feats["nb_mains"],
+            "hand_boxes": hand_boxes,
+            "image_annotee": annotated_bytes,
             "au_01": au_01, "au_02": au_02, "au_04": au_04, "au_06": au_06, "au_12": au_12,
             "openpose_ok": openpose_ok
         })
@@ -292,7 +345,8 @@ def ui_attitudes_images(df_nv_images: pd.DataFrame, df_nv_agrege: pd.DataFrame):
         return
 
     st.markdown("**Résultats par image**")
-    st.dataframe(df_nv_images)
+    df_affichage = df_nv_images.drop(columns=["image_annotee", "hand_boxes"], errors="ignore")
+    st.dataframe(df_affichage)
 
     if df_nv_agrege is not None and not df_nv_agrege.empty:
         st.markdown("**Agrégation temporelle (par seconde)**")
@@ -332,3 +386,28 @@ def ui_attitudes_images(df_nv_images: pd.DataFrame, df_nv_agrege: pd.DataFrame):
 
     else:
         st.caption("Aucune agrégation disponible.")
+
+    # prévisualisations d'images annotées
+    images_annotees: list[bytes] = []
+    captions: list[str] = []
+    for _, row in df_nv_images.iterrows():
+        data = row.get("image_annotee")
+        if not isinstance(data, (bytes, bytearray)):
+            continue
+        images_annotees.append(bytes(data))
+        nom = row.get("fichier_image", "") or ""
+        nb_mains = row.get("nb_mains")
+        try:
+            nb_mains_txt = int(nb_mains) if pd.notna(nb_mains) else "NA"
+        except Exception:
+            nb_mains_txt = nb_mains
+        t_val = row.get("t_image")
+        if isinstance(t_val, (int, float)) and np.isfinite(t_val):
+            t_txt = f"t={t_val:.2f}s"
+        else:
+            t_txt = "t=?"
+        captions.append(f"{nom} – {t_txt} – mains: {nb_mains_txt}")
+
+    if images_annotees:
+        st.markdown("**Images annotées (mains encadrées en vert)**")
+        st.image(images_annotees, caption=captions, width=260)
