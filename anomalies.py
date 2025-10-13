@@ -235,27 +235,6 @@ def _suggestions_colonnes(df: pd.DataFrame, mots_cles: Sequence[str]) -> list[st
     return suggestions or numeric_cols
 
 
-def _style_anomalies_table(df_evt: pd.DataFrame):
-    if df_evt is None or df_evt.empty:
-        return df_evt
-
-    def _highlight_row(_row):
-        return ["border: 2px solid #d62728; background-color: rgba(214, 39, 40, 0.12);"] * len(_row)
-
-    styler = df_evt.style.apply(_highlight_row, axis=1)
-    styler = styler.set_table_styles([
-        {
-            "selector": "th",
-            "props": "border: 2px solid #d62728; background-color: rgba(214, 39, 40, 0.25);"
-        },
-        {
-            "selector": "td",
-            "props": "border: 2px solid #d62728;"
-        },
-    ])
-    return styler
-
-
 def ui_anomalies(
     df_texte: pd.DataFrame | None = None,
     df_audio: pd.DataFrame | None = None,
@@ -313,7 +292,7 @@ def ui_anomalies(
         if df_evt.empty:
             st.success("Aucune anomalie détectée avec les paramètres courants.")
             return
-        st.dataframe(_style_anomalies_table(df_evt), use_container_width=True)
+        st.dataframe(df_evt, use_container_width=True)
 
     _section("Texte", df_texte, temps_texte, ["ratio", "deict", "planif", "verbe"])
     _section("Audio", df_audio, temps_audio, ["intens", "debit", "pause", "energy", "pitch"])
