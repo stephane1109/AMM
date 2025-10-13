@@ -70,95 +70,6 @@ def _charger_cascade_visage() -> "cv2.CascadeClassifier | None":
     return _FACE_CASCADE
 
 
-class _Cv2EmotionDetector:
-    """Détecteur d'émotions de secours basé sur OpenCV.
-
-    Cette implémentation s'appuie sur des cascades de Haar pour détecter les visages
-    et les sourires. Elle fournit une estimation grossière de l'émotion dominante :
-    « heureux » si un sourire est détecté, sinon « neutre ». Ce détecteur permet de
-    proposer une analyse minimale lorsque `fer` n'est pas disponible.
-    """
-
-    def __init__(self) -> None:
-        if cv2 is None:
-            raise RuntimeError("OpenCV n'est pas disponible dans l'environnement courant.")
-
-        base_path = getattr(cv2.data, "haarcascades", "")
-        face_path = os.path.join(base_path, "haarcascade_frontalface_default.xml")
-        smile_path = os.path.join(base_path, "haarcascade_smile.xml")
-
-        self._face_cascade = cv2.CascadeClassifier(face_path)
-        self._smile_cascade = cv2.CascadeClassifier(smile_path)
-        self._orientation: str | None = None
-
-        if self._face_cascade.empty():
-            raise RuntimeError(
-                "Impossible de charger le classifieur de visages OpenCV (haarcascade_frontalface_default)."
-            )
-        if self._smile_cascade.empty():
-            raise RuntimeError(
-                "Impossible de charger le classifieur de sourires OpenCV (haarcascade_smile)."
-            )
-
-    def set_orientation(self, orientation: str | None) -> None:
-        """Permet d'ajuster dynamiquement les paramètres de détection."""
-
-        self._orientation = orientation
-
-    def detect_emotions(self, image: np.ndarray) -> list[dict[str, Any]]:  # pragma: no cover - dépendance optionnelle
-        if image is None or image.size == 0:
-            return []
-
-        if image.ndim == 2:
-            gray = image
-        else:
-            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-
-        gray = cv2.equalizeHist(gray)
-
-        orientation = (self._orientation or "").lower()
-        if orientation in {"portrait", "9:16"}:
-            scale_factor = 1.08
-            min_neighbors = 5
-            min_size = (30, 30)
-        else:
-            scale_factor = 1.15
-            min_neighbors = 6
-            min_size = (40, 40)
-
-        faces = self._face_cascade.detectMultiScale(
-            gray,
-            scaleFactor=scale_factor,
-            minNeighbors=min_neighbors,
-            minSize=min_size,
-        )
-
-        resultats: list[dict[str, Any]] = []
-        for (x, y, w, h) in faces:
-            roi_gray = gray[y : y + h, x : x + w]
-            smiles = self._smile_cascade.detectMultiScale(
-                roi_gray,
-                scaleFactor=1.7,
-                minNeighbors=22,
-                minSize=(15, 15),
-            )
-
-            a_sourire = len(smiles) > 0
-            if a_sourire:
-                scores = {"happy": 0.9, "neutral": 0.1, "sad": 0.0}
-            else:
-                scores = {"happy": 0.1, "neutral": 0.7, "sad": 0.2}
-
-            resultats.append(
-                {
-                    "box": [int(x), int(y), int(w), int(h)],
-                    "emotions": scores,
-                }
-            )
-
-        return resultats
-
-
 def _message_erreur_fer() -> str:
     """Construit un message d'aide en cas d'échec de l'import du paquet FER."""
 
@@ -207,27 +118,8 @@ def charger_modele_emotions() -> tuple[Any | None, str]:
     else:
         messages.append(_message_erreur_fer())
 
-    if _CV2_DISPONIBLE:
-        try:
-            detector_cv2 = _Cv2EmotionDetector()
-        except Exception as exc:  # pragma: no cover - dépendance optionnelle
-            messages.append(f"Échec de l'initialisation du détecteur OpenCV : {exc}")
-        else:
-            resume = (
-                "Détecteur simplifié basé sur OpenCV (détection de sourires avec cascades de Haar)."
-            )
-            if messages:
-                resume += " " + " ".join(messages)
-            return detector_cv2, resume
-    else:
-        details = f" Détail de l'erreur : {_CV2_IMPORT_ERROR}" if _CV2_IMPORT_ERROR else ""
-        messages.append(
-            "Le paquet `opencv-python` est requis pour la détection de visages. Installez-le"
-            " avec `pip install opencv-python` puis redémarrez l'application." + details
-        )
-
     if not messages:
-        messages.append("Aucun détecteur d'émotions n'est disponible dans l'environnement courant.")
+        messages.append("Le modèle FER est requis pour détecter les six émotions de base.")
 
     return None, " ".join(messages)
 
