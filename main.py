@@ -473,8 +473,7 @@ with st.sidebar:
     nlp, msg_nlp = charger_spacy_transformer()
     st.caption(msg_nlp)
     locuteur_global = st.text_input("Identifiant locuteur", value="locuteur_1")
-    afficher_avance = st.checkbox("Afficher toutes les colonnes (mode avancé)", value=False)
-    use_whisper = st.checkbox("Transcrire l’audio avec Whisper (si installé)", value=False)
+    use_whisper = st.checkbox("Transcrire l'audio avec Whisper (si installé)", value=False)
     fichiers_txt = st.file_uploader("Fichiers texte (.txt)", type=["txt"], accept_multiple_files=True)
     fichiers_audio = st.file_uploader("Fichiers audio (.wav, .mp3)", type=["wav", "mp3"], accept_multiple_files=True)
     fichier_timestamps = st.file_uploader(
@@ -485,14 +484,13 @@ with st.sidebar:
     )
     st.divider()
     st.caption("Images synchronisées (1 fps strict) : i_12s_1fps.jpg")
-    decalage_global_s = st.number_input("Décalage global images (s)", value=0.0, step=0.1, format="%.2f")
-    format_images = st.radio(
-        "Format des images",
-        options=["16:9 (paysage)", "9:16 (portrait)"],
+    format_image = st.radio(
+        "Format des images (pour optimiser la détection de visage)",
+        options=["16/9 (Paysage)", "9/16 (Portrait)"],
         index=0,
-        help="Indiquez le format dominant pour adapter la détection des visages.",
+        horizontal=True
     )
-    st.session_state["images_orientation"] = "9:16" if "9:16" in format_images else "16:9"
+    decalage_global_s = st.number_input("Décalage global images (s)", value=0.0, step=0.1, format="%.2f")
     fichiers_images = st.file_uploader("Images (.png, .jpg, .jpeg)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
     lancer = st.button("Lancer l’analyse")
 
@@ -533,7 +531,7 @@ if lancer:
                         "termes_deictiques_proches","termes_deictiques_eloignes","termes_deictiques_passes","termes_deictiques_plannificateur",
                         "termes_planification","termes_causaux"
                     ]
-                    st.dataframe(df_docs if afficher_avance else df_docs[[c for c in cols_docs if c in df_docs.columns]])
+                    st.dataframe(df_docs[[c for c in cols_docs if c in df_docs.columns]])
 
                 if segments_txt_rows:
                     df_segt = pd.concat(segments_txt_rows, ignore_index=True)
@@ -549,7 +547,7 @@ if lancer:
                         "termes_planification"
                     ]
                     st.markdown("Segments (phrases) sans timing")
-                    st.dataframe(df_segt if afficher_avance else df_segt[[c for c in cols_seg if c in df_segt.columns]])
+                    st.dataframe(df_segt[[c for c in cols_seg if c in df_segt.columns]])
 
         st.subheader("Audio – Récapitulatif et alignement (timestamps Whisper)")
         audio_rows, plots_audio = [], []
@@ -672,7 +670,7 @@ if lancer:
                 "nb_pauses","duree_pauses_totale_s","duree_pause_moy_s","duree_pause_med_s",
                 "parole_active_ratio","debit_proxy_sps","duree_audio_s"
             ]
-            st.dataframe(df_audio if afficher_avance else df_audio[cols_audio])
+            st.dataframe(df_audio[cols_audio])
 
         st.subheader("Images – Inventaire (1 fps strict)")
         if fichiers_images:
@@ -847,9 +845,8 @@ with tab_attitudes:
 
 with tab_emotions:
     df_images = st.session_state.get("df_images")
-    orientation_images = st.session_state.get("images_orientation")
     try:
-        ui_emotions_images(df_images, orientation_images=orientation_images)
+        ui_emotions_images(df_images)
     except Exception as e:
         st.error(f"Erreur interface émotions : {e}")
 
