@@ -13,6 +13,14 @@ import streamlit as st
 import altair as alt
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
+try:  # pragma: no cover - dépendance optionnelle
+    import xlsxwriter  # type: ignore
+
+    _XLSXWRITER_DISPONIBLE = True
+except Exception:  # pragma: no cover - dépendance optionnelle
+    xlsxwriter = None  # type: ignore
+    _XLSXWRITER_DISPONIBLE = False
+
 # Détection optionnelle avec le modèle FER (Facial Emotion Recognition).
 _FER_IMPORT_ERROR = ""
 _CV2_IMPORT_ERROR = ""
@@ -154,11 +162,14 @@ def charger_modele_emotions() -> tuple[Any | None, str]:
 
     if _FER_DISPONIBLE:
         try:
-            detector = FER()
+            detector = FER(mtcnn=True)
         except Exception as exc:  # pragma: no cover - dépendance optionnelle
             messages.append(f"Échec de l'initialisation du modèle FER : {exc}")
         else:
-            return detector, "Modèle FER initialisé (architecture CNN pré-entraînée sur FER2013)."
+            return (
+                detector,
+                "Modèle FER initialisé avec MTCNN pour la détection de visages (CNN pré-entraîné sur FER2013).",
+            )
     else:
         fer_message = _message_erreur_fer()
         messages.append(fer_message)
@@ -615,6 +626,29 @@ def ui_emotions_images(df_images: pd.DataFrame | None, orientation_images: str |
 
     st.session_state["df_emotions"] = df_res.copy()
 
+    emotions_labels = ["angry", "disgust", "fear", "happy", "sad", "surprise", "neutral"]
+    fichier_excel, emotion_data = _exporter_scores_emotions(df_res, noms_images, emotions_labels)
+    if emotion_data is not None:
+        st.session_state["emotion_scores_export"] = emotion_data
+
+    excel_bytes: bytes | None = None
+    if fichier_excel:
+        try:
+            with open(fichier_excel, "rb") as fichier:
+                excel_bytes = fichier.read()
+        except Exception:
+            excel_bytes = None
+
+    if fichier_excel and excel_bytes is not None:
+        st.success(f"Fichier Excel généré dans : {fichier_excel}")
+    elif not _XLSXWRITER_DISPONIBLE:
+        st.info(
+            "Le paquet `xlsxwriter` est requis pour produire l'export Excel des scores"
+            " d'émotions (installez-le avec `pip install xlsxwriter`)."
+        )
+    else:
+        st.warning("Impossible de créer le fichier Excel des scores d'émotions.")
+
     st.markdown("#### Résultats détaillés")
     colonnes_affichage = {
         "fichier_image": "Fichier image",
@@ -711,6 +745,14 @@ def ui_emotions_images(df_images: pd.DataFrame | None, orientation_images: str |
         mime="text/csv",
     )
 
+    if fichier_excel and excel_bytes is not None:
+        st.download_button(
+            "Télécharger les scores d'émotions (Excel)",
+            data=excel_bytes,
+            file_name="emotions_scores.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
 
 def _recuperer_timestamp(df_images: pd.DataFrame, nom: str) -> float | np.nan:
     """Récupère la valeur t_image correspondante si disponible."""
@@ -724,3 +766,58 @@ def _recuperer_timestamp(df_images: pd.DataFrame, nom: str) -> float | np.nan:
         return float(val) if pd.notna(val) else np.nan
     except Exception:
         return np.nan
+
+
+def _exporter_scores_emotions(
+    df_res: pd.DataFrame,
+    noms_images: list[str],
+    emotions: list[str],
+) -> tuple[str | None, dict[str, list[float]] | None]:
+    """Exporte les scores d'émotions par image dans un fichier Excel."""
+
+    if not _XLSXWRITER_DISPONIBLE:
+        return None, None
+
+    try:
+        output_path = os.path.join(os.getcwd(), "emotion")
+        os.makedirs(output_path, exist_ok=True)
+    except Exception:
+        return None, None
+
+    fichier_excel = os.path.join(output_path, "emotions_scores.xlsx")
+
+    try:
+        with xlsxwriter.Workbook(fichier_excel) as workbook:  # type: ignore[attr-defined]
+            worksheet = workbook.add_worksheet()
+            worksheet.write(0, 0, "Image")
+            for idx, emotion in enumerate(emotions):
+                worksheet.write(0, idx + 1, emotion)
+
+            emotion_data = {emotion: [] for emotion in emotions}
+            row = 1
+
+            for nom in noms_images:
+                sous_df = df_res[df_res["fichier_image"] == nom]
+                moyenne_scores = {emotion: 0.0 for emotion in emotions}
+                compteur = 0
+                for _, ligne in sous_df.iterrows():
+                    scores = ligne.get("emotion_scores")
+                    if isinstance(scores, dict) and scores:
+                        compteur += 1
+                        for emotion in emotions:
+                            moyenne_scores[emotion] += float(scores.get(emotion, 0.0))
+
+                if compteur:
+                    for emotion in emotions:
+                        moyenne_scores[emotion] /= compteur
+
+                worksheet.write(row, 0, nom)
+                for idx, emotion in enumerate(emotions, start=1):
+                    valeur = float(moyenne_scores.get(emotion, 0.0))
+                    worksheet.write(row, idx, valeur)
+                    emotion_data[emotion].append(valeur)
+                row += 1
+    except Exception:
+        return None, None
+
+    return fichier_excel, emotion_data

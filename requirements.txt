@@ -12,3 +12,4 @@ scipy
 soundfile
 spacy[transformers]
 streamlit
+xlsxwriter
