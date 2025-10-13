@@ -48,6 +48,48 @@ except Exception as exc:  # pragma: no cover - dépendance optionnelle
 _FACE_CASCADE: "cv2.CascadeClassifier | None" = None
 
 
+class _OpenCVOnlyEmotionDetector:
+    """Détecteur simplifié utilisant uniquement OpenCV pour repérer les visages.
+
+    Ce détecteur constitue un repli lorsque le paquet `fer` n'est pas disponible
+    (par exemple lorsque sa dépendance optionnelle `moviepy` est absente).
+    Il ne fournit pas d'analyse émotionnelle approfondie : chaque visage détecté
+    est associé à l'émotion neutre avec une confiance de 1.0. L'objectif est
+    surtout d'éviter la désactivation complète de la fonctionnalité et de
+    permettre la visualisation des visages détectés dans l'interface.
+    """
+
+    def __init__(self) -> None:
+        if not _CV2_DISPONIBLE:
+            raise RuntimeError("OpenCV n'est pas disponible dans l'environnement courant")
+        if _charger_cascade_visage() is None:
+            raise RuntimeError("Impossible de charger le classifieur Haar d'OpenCV")
+        self._orientation: str | None = None
+
+    def set_orientation(self, orientation: str | None) -> None:
+        self._orientation = orientation
+
+    def detect_emotions(self, image: np.ndarray) -> list[dict[str, Any]]:
+        orientation = self._orientation
+        faces = _detect_faces_cv2(image, orientation)
+        resultats: list[dict[str, Any]] = []
+        for (x1, y1, x2, y2) in faces:
+            largeur = max(0, x2 - x1)
+            hauteur = max(0, y2 - y1)
+            resultats.append(
+                {
+                    "box": [int(x1), int(y1), int(largeur), int(hauteur)],
+                    "emotions": {"neutral": 1.0},
+                    "confidence": 1.0,
+                }
+            )
+        return resultats
+
+    @property
+    def name(self) -> str:
+        return "OpenCV (détection de visages uniquement)"
+
+
 def _charger_cascade_visage() -> "cv2.CascadeClassifier | None":
     """Charge et met en cache le détecteur de visages Haar d'OpenCV."""
 
@@ -108,6 +150,8 @@ def charger_modele_emotions() -> tuple[Any | None, str]:
 
     messages: list[str] = []
 
+    fer_message = ""
+
     if _FER_DISPONIBLE:
         try:
             detector = FER()
@@ -116,10 +160,24 @@ def charger_modele_emotions() -> tuple[Any | None, str]:
         else:
             return detector, "Modèle FER initialisé (architecture CNN pré-entraînée sur FER2013)."
     else:
-        messages.append(_message_erreur_fer())
+        fer_message = _message_erreur_fer()
+        messages.append(fer_message)
+
+    if _CV2_DISPONIBLE:
+        try:
+            opencv_detector = _OpenCVOnlyEmotionDetector()
+        except Exception as exc:
+            messages.append(str(exc))
+        else:
+            message = "Détecteur de visages OpenCV activé (émotion neutre par défaut, sans dépendre de FER)."
+            if fer_message:
+                message = f"{fer_message} {message}"
+            return opencv_detector, message
 
     if not messages:
-        messages.append("Le modèle FER est requis pour détecter les six émotions de base.")
+        messages.append(
+            "Le modèle FER ou, à défaut, la bibliothèque `opencv-python` est requis pour analyser les visages."
+        )
 
     return None, " ".join(messages)
 
