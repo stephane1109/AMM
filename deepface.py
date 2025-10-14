@@ -3,9 +3,9 @@
 Le paquet `deepface` propose plusieurs backends de détection.  Dans ce
 projet nous n'avons besoin que de la partie "détection", que nous
 ré-implémentons avec une API compatible en nous appuyant sur
-``modelesdetect``.  Les dépendances (OpenCV, MTCNN, RetinaFace, YOLOv8)
-restent optionnelles : seules celles réellement utilisées doivent être
-installées.
+``modelesdetect``.  Les dépendances (OpenCV pour l'alignement,
+RetinaFace, YOLOv8) restent optionnelles : seules celles réellement
+utilisées doivent être installées.
 """
 from __future__ import annotations
 

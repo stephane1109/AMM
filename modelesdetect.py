@@ -1,10 +1,10 @@
 """Utilitaires pour gérer différents modèles de détection de visages.
 
 Ce module centralise la création de détecteurs afin de proposer une
-interface homogène entre OpenCV, MTCNN, RetinaFace et YOLOv8.  Il gère
-également les dépendances optionnelles : chaque détecteur est importé
-et initialisé à la demande, et des messages explicites sont levés si la
-bibliothèque correspondante n'est pas installée.
+interface homogène entre RetinaFace et YOLOv8. Il gère également les
+dépendances optionnelles : chaque détecteur est importé et initialisé à
+la demande, et des messages explicites sont levés si la bibliothèque
+correspondante n'est pas installée.
 """
 from __future__ import annotations
 
@@ -13,19 +13,6 @@ from functools import lru_cache
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
-
-try:
-    import cv2
-except Exception as exc:  # pragma: no cover - dépend de l'environnement
-    cv2 = None
-    _cv2_error = exc
-else:
-    _cv2_error = None
-
-try:
-    from mtcnn import MTCNN
-except Exception:  # pragma: no cover - dépend de l'environnement
-    MTCNN = None
 
 try:
     from retinaface import RetinaFace
@@ -82,57 +69,6 @@ class BaseDetector:
         return image
 
 
-class OpenCVCascadeDetector(BaseDetector):
-    backend_name = "opencv"
-
-    def __init__(self, cascade_path: Optional[str] = None) -> None:
-        if cv2 is None:  # pragma: no cover - dépend de l'environnement
-            raise ImportError(
-                "OpenCV n'est pas disponible : installez opencv-python"  # noqa: E501
-            ) from _cv2_error
-
-        path = (
-            cascade_path
-            or cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        )
-        self._cascade = cv2.CascadeClassifier(path)
-        if self._cascade.empty():  # pragma: no cover - dépend de l'environnement
-            raise ValueError(f"Cascade OpenCV introuvable : {path}")
-
-    def detect(self, image: np.ndarray) -> List[DetectionResult]:
-        img = self._ensure_bgr(image)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        boxes = self._cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
-        results: List[DetectionResult] = []
-        for (x, y, w, h) in boxes:
-            results.append(DetectionResult((int(x), int(y), int(x + w), int(y + h)), 1.0))
-        return results
-
-
-class MTCNNDetector(BaseDetector):
-    backend_name = "mtcnn"
-
-    def __init__(self) -> None:
-        if MTCNN is None:  # pragma: no cover - dépend de l'environnement
-            raise ImportError("MTCNN n'est pas disponible : pip install mtcnn")
-        self._detector = MTCNN()
-
-    def detect(self, image: np.ndarray) -> List[DetectionResult]:
-        img = self._ensure_bgr(image)
-        detections = self._detector.detect_faces(img)
-        results: List[DetectionResult] = []
-        for d in detections:
-            x, y, w, h = d.get("box", (0, 0, 0, 0))
-            conf = float(d.get("confidence", 0.0))
-            landmarks = d.get("keypoints")
-            if isinstance(landmarks, dict):
-                lm = {k: (int(v[0]), int(v[1])) for k, v in landmarks.items()}
-            else:
-                lm = None
-            results.append(DetectionResult((x, y, x + w, y + h), conf, lm))
-        return results
-
-
 class RetinaFaceDetector(BaseDetector):
     backend_name = "retinaface"
 
@@ -186,8 +122,6 @@ class YoloV8Detector(BaseDetector):
 
 
 _DETECTOR_FACTORIES = {
-    OpenCVCascadeDetector.backend_name: OpenCVCascadeDetector,
-    MTCNNDetector.backend_name: MTCNNDetector,
     RetinaFaceDetector.backend_name: RetinaFaceDetector,
     YoloV8Detector.backend_name: YoloV8Detector,
 }
