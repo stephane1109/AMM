@@ -1,33 +1,44 @@
 # attitudes.py
 # Extraction d'attitudes non verbales à partir d'IMAGES (pas de vidéo)
-# Si MediaPipe est disponible, on calcule quelques indicateurs simples :
-# - ouverture de la bouche (bouche_ouverture)
-# - ouverture des épaules (ouverture_epaules) via repères Pose
-# - orientation approximative de la tête (orientation_tete) via repères du visage
-# - nombre de mains visibles (nb_mains)
+# Si DeepFace et YOLOv8 sont disponibles, on calcule quelques indicateurs simples :
+# - ouverture de la bouche (bouche_ouverture) via les repères du détecteur facial
+# - orientation approximative de la tête (orientation_tete) via les yeux
+# - ouverture des épaules (ouverture_epaules) via le modèle pose YOLOv8
+# - nombre de mains visibles (nb_mains) via les poignets détectés
 # Les résultats sont renvoyés par image + une agrégation temporelle (seconde).
 
 import io
 import math
-import os
 import numpy as np
 import pandas as pd
 import streamlit as st
 from PIL import Image, ImageDraw
 import altair as alt
 
-# Forcer MediaPipe à fonctionner en mode CPU : certaines plateformes (macOS
-# sans contexte graphique, environnements headless, etc.) ne peuvent pas
-# initialiser l'OpenGL requis par les graphes GPU. L'environnement
-# MEDIAPIPE_DISABLE_GPU désactive la dépendance au service GPU.
-os.environ.setdefault("MEDIAPIPE_DISABLE_GPU", "1")
-
-# chargement optionnel de mediapipe
 try:
-    import mediapipe as mp
-    _mp_ok = True
-except Exception:
-    _mp_ok = False
+    from deepface import DEFAULT_BACKEND as _DF_BACKEND, detect_faces as _df_detect_faces
+    _deepface_ok = True
+    _deepface_err = ""
+except Exception as exc:  # pragma: no cover - dépend des installs
+    _deepface_ok = False
+    _deepface_err = str(exc)
+    _df_detect_faces = None  # type: ignore[assignment]
+    _DF_BACKEND = "retinaface"
+
+try:
+    from ultralytics import YOLO
+except Exception as exc:  # pragma: no cover - dépend des installs
+    YOLO = None  # type: ignore[assignment]
+    _yolo_ok = False
+    _yolo_err = str(exc)
+else:
+    _yolo_ok = True
+    _yolo_err = ""
+
+_POSE_MODEL_NAME = "yolov8n-pose.pt"
+_POSE_MODEL = None
+_POSE_MODEL_FAILED = False
+_POSE_MODEL_ERR = ""
 
 
 # =========================
@@ -52,39 +63,24 @@ def _dist(p1, p2):
     """distance euclidienne 2D."""
     return float(math.hypot(p1[0] - p2[0], p1[1] - p2[1]))
 
-def _safe_get(ls, idx):
-    """accès sécurisé dans une liste de landmarks."""
-    if ls is None or idx is None:
+
+def _ensure_pose_model():
+    """Charge le modèle YOLOv8 pose une seule fois (si disponible)."""
+
+    global _POSE_MODEL, _POSE_MODEL_FAILED, _POSE_MODEL_ERR
+    if not _yolo_ok or YOLO is None:
         return None
-    if idx < 0 or idx >= len(ls):
+    if _POSE_MODEL is not None:
+        return _POSE_MODEL
+    if _POSE_MODEL_FAILED:
         return None
-    return ls[idx]
-
-def _norm_xy(lm, w, h):
-    """convertir un landmark normalisé mediapipe (x,y) en pixels."""
-    return (float(lm.x * w), float(lm.y * h))
-
-
-def _hand_boxes_from_landmarks(res_hands, w: int, h: int) -> list[tuple[int, int, int, int]]:
-    """Convertit les landmarks de mains MediaPipe en boîtes englobantes pixel."""
-    boxes: list[tuple[int, int, int, int]] = []
-    if not res_hands or not getattr(res_hands, "multi_hand_landmarks", None):
-        return boxes
-    for hand_landmarks in res_hands.multi_hand_landmarks:
-        xs = [lm.x for lm in hand_landmarks.landmark]
-        ys = [lm.y for lm in hand_landmarks.landmark]
-        if not xs or not ys:
-            continue
-        min_x = max(0.0, min(xs)) * w
-        max_x = min(1.0, max(xs)) * w
-        min_y = max(0.0, min(ys)) * h
-        max_y = min(1.0, max(ys)) * h
-        # éviter les boîtes dégénérées
-        if (max_x - min_x) < 1 or (max_y - min_y) < 1:
-            continue
-        boxes.append((int(min_x), int(min_y), int(max_x), int(max_y)))
-    return boxes
-
+    try:
+        _POSE_MODEL = YOLO(_POSE_MODEL_NAME)
+        return _POSE_MODEL
+    except Exception as exc:  # pragma: no cover - dépend des installs
+        _POSE_MODEL_FAILED = True
+        _POSE_MODEL_ERR = str(exc)
+        return None
 
 def _draw_boxes_on_image(
     img: Image.Image,
@@ -101,115 +97,197 @@ def _draw_boxes_on_image(
 
 
 # =========================
-# calcul indicateurs (MediaPipe si dispo)
+# calcul indicateurs (DeepFace + YOLOv8 si dispo)
 # =========================
 
-def _analyser_image_mediapipe(arr_rgb):
-    """
-    calculer des indicateurs non verbaux simples à partir d'une image numpy RGB.
-    retourne un dict avec:
-      - bouche_ouverture (ratio)
-      - orientation_tete (degrés approximatifs, signe = gauche/droite)
-      - ouverture_epaules (distance normalisée)
-      - nb_mains (0,1,2)
-    si aucun visage/corps/mains détecté: NaN/0.
-    """
-    if not _mp_ok:
-        return {"bouche_ouverture": np.nan,
-                "orientation_tete": np.nan,
-                "ouverture_epaules": np.nan,
-                "nb_mains": 0,
-                "hand_boxes": []}
+def _analyse_image_deepface(arr_rgb: np.ndarray, backend: str | None = None) -> dict:
+    """Analyse du visage via DeepFace (ou implémentation locale)."""
 
-    h, w, _ = arr_rgb.shape
+    if not _deepface_ok or _df_detect_faces is None:
+        return {
+            "bouche_ouverture": np.nan,
+            "orientation_tete": np.nan,
+            "face_box": None,
+        }
 
-    # face mesh
-    fm = mp.solutions.face_mesh.FaceMesh(
-        static_image_mode=True,
-        refine_landmarks=True,
-        max_num_faces=1,
-        min_detection_confidence=0.5
-    )
-    # pose
-    pose = mp.solutions.pose.Pose(static_image_mode=True)
-    # hands
-    hands = mp.solutions.hands.Hands(static_image_mode=True, max_num_hands=2)
+    try:
+        detections = _df_detect_faces(
+            arr_rgb,
+            detector_backend=(backend or _DF_BACKEND),
+            align=False,
+            enforce_detection=False,
+        )
+    except Exception:
+        detections = []
+
+    if not detections:
+        return {
+            "bouche_ouverture": np.nan,
+            "orientation_tete": np.nan,
+            "face_box": None,
+        }
+
+    best = max(detections, key=lambda d: float(d.get("confidence", 0.0)))
+    landmarks = best.get("landmarks") or {}
+
+    def _lm(key):
+        pt = landmarks.get(key)
+        if pt is None:
+            return None
+        try:
+            x, y = float(pt[0]), float(pt[1])
+        except Exception:
+            return None
+        if not (math.isfinite(x) and math.isfinite(y)):
+            return None
+        return (x, y)
+
+    left_eye = _lm("left_eye")
+    right_eye = _lm("right_eye")
+    mouth_left = _lm("mouth_left")
+    mouth_right = _lm("mouth_right")
 
     bouche_ouverture = np.nan
     orientation_tete = np.nan
+
+    if left_eye and right_eye:
+        dx = right_eye[0] - left_eye[0]
+        dy = right_eye[1] - left_eye[1]
+        if abs(dx) > 1e-6 or abs(dy) > 1e-6:
+            orientation_tete = float(math.degrees(math.atan2(dy, dx)))
+
+    if left_eye and right_eye and mouth_left and mouth_right:
+        inter_oc = _dist(left_eye, right_eye)
+        bouche = _dist(mouth_left, mouth_right)
+        if inter_oc > 1e-6:
+            bouche_ouverture = bouche / inter_oc
+
+    return {
+        "bouche_ouverture": bouche_ouverture,
+        "orientation_tete": orientation_tete,
+        "face_box": tuple(best.get("box", ())) or None,
+    }
+
+
+def _analyse_image_pose(arr_rgb: np.ndarray) -> dict:
+    """Analyse du corps via YOLOv8 pose (épaules + mains)."""
+
+    h, w = arr_rgb.shape[:2]
+    default = {
+        "ouverture_epaules": np.nan,
+        "nb_mains": 0,
+        "hand_boxes": [],
+    }
+
+    model = _ensure_pose_model()
+    if model is None:
+        return default
+
+    try:
+        results = model(arr_rgb, verbose=False)
+    except Exception:
+        return default
+
+    if not results:
+        return default
+
+    pred = results[0]
+    keypoints = getattr(pred, "keypoints", None)
+    if keypoints is None or getattr(keypoints, "xy", None) is None:
+        return default
+
+    def _tensor_to_np(tensor):
+        try:
+            return tensor.detach().cpu().numpy()
+        except Exception:
+            try:
+                return tensor.cpu().numpy()
+            except Exception:
+                return None
+
+    kp_xy = _tensor_to_np(keypoints.xy)
+    if kp_xy is None or kp_xy.size == 0:
+        return default
+
+    boxes = getattr(pred, "boxes", None)
+    kp_conf = getattr(keypoints, "conf", None)
+    conf_arr = _tensor_to_np(kp_conf) if kp_conf is not None else None
+    boxes_conf = None
+    if boxes is not None and getattr(boxes, "conf", None) is not None:
+        boxes_conf = _tensor_to_np(boxes.conf)
+
+    idx = 0
+    if boxes_conf is not None and boxes_conf.size > 0:
+        idx = int(np.argmax(boxes_conf))
+    idx = max(0, min(idx, kp_xy.shape[0] - 1))
+
+    pts = kp_xy[idx]
+    conf_idx = conf_arr[idx] if conf_arr is not None and conf_arr.ndim >= 2 else (
+        conf_arr if conf_arr is not None else None
+    )
+
+    def _kp(idk: int):
+        if idk >= pts.shape[0]:
+            return None
+        x, y = float(pts[idk][0]), float(pts[idk][1])
+        if not (math.isfinite(x) and math.isfinite(y)):
+            return None
+        if conf_idx is not None:
+            try:
+                cval = float(conf_idx[idk])
+            except Exception:
+                cval = float(conf_idx)
+            if cval < 0.25:
+                return None
+        return (x, y)
+
+    left_shoulder = _kp(5)
+    right_shoulder = _kp(6)
+    left_wrist = _kp(9)
+    right_wrist = _kp(10)
+
     ouverture_epaules = np.nan
-    nb_mains = 0
-    hand_boxes: list[tuple[int, int, int, int]] = []
+    if left_shoulder and right_shoulder:
+        ouverture_epaules = _dist(left_shoulder, right_shoulder) / max(1.0, float(w))
 
-    # exécution
-    res_face = fm.process(arr_rgb)
-    res_pose = pose.process(arr_rgb)
-    res_hands = hands.process(arr_rgb)
+    nb_mains = sum(1 for pt in (left_wrist, right_wrist) if pt is not None)
 
-    # mains
-    if res_hands and res_hands.multi_hand_landmarks:
-        nb_mains = len(res_hands.multi_hand_landmarks)
-        hand_boxes = _hand_boxes_from_landmarks(res_hands, w, h)
+    boxes_xyxy = None
+    if boxes is not None and getattr(boxes, "xyxy", None) is not None:
+        boxes_xyxy = _tensor_to_np(boxes.xyxy)
+
+    ref_size = 0.15 * min(float(w), float(h))
+    if boxes_xyxy is not None and len(boxes_xyxy) > idx:
+        x1, y1, x2, y2 = boxes_xyxy[idx]
+        bw = float(x2 - x1)
+        bh = float(y2 - y1)
+        ref_size = max(20.0, 0.3 * min(abs(bw), abs(bh)))
     else:
-        nb_mains = 0
-        hand_boxes = []
+        ref_size = max(20.0, ref_size)
 
-    # visage
-    if res_face and res_face.multi_face_landmarks:
-        fl = res_face.multi_face_landmarks[0].landmark
+    def _box_from_point(pt):
+        if pt is None:
+            return None
+        size = ref_size
+        x1 = int(max(0.0, pt[0] - size / 2.0))
+        y1 = int(max(0.0, pt[1] - size / 2.0))
+        x2 = int(min(float(w), pt[0] + size / 2.0))
+        y2 = int(min(float(h), pt[1] + size / 2.0))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return (x1, y1, x2, y2)
 
-        # indices utiles (FaceMesh) :
-        # lèvres sup/inf approximatives : 13 (upper lip), 14 (lower lip)
-        # coins des yeux : 33 (œil droit extérieur), 263 (œil gauche extérieur)
-        idx_upper = 13
-        idx_lower = 14
-        idx_eye_r = 33
-        idx_eye_l = 263
+    hand_boxes = [
+        box
+        for box in (_box_from_point(left_wrist), _box_from_point(right_wrist))
+        if box is not None
+    ]
 
-        p_up = _safe_get(fl, idx_upper)
-        p_lo = _safe_get(fl, idx_lower)
-        p_er = _safe_get(fl, idx_eye_r)
-        p_el = _safe_get(fl, idx_eye_l)
-
-        if p_up and p_lo and p_er and p_el:
-            p_up = _norm_xy(p_up, w, h)
-            p_lo = _norm_xy(p_lo, w, h)
-            p_er = _norm_xy(p_er, w, h)
-            p_el = _norm_xy(p_el, w, h)
-
-            bouche = _dist(p_up, p_lo)
-            inter_oc = _dist(p_er, p_el)
-            if inter_oc > 1e-6:
-                bouche_ouverture = bouche / inter_oc
-
-            # orientation approximative : angle de la droite (œil gauche -> œil droit)
-            dx = (p_er[0] - p_el[0])
-            dy = (p_er[1] - p_el[1])
-            angle = math.degrees(math.atan2(dy, dx))  # ~0 si horizontal
-            orientation_tete = float(angle)
-
-    # épaules (Pose)
-    if res_pose and res_pose.pose_landmarks:
-        pl = res_pose.pose_landmarks.landmark
-        # indices épaules droite/gauche mediapipe pose: 11 (gauche), 12 (droite)
-        p_ls = _safe_get(pl, 11)
-        p_rs = _safe_get(pl, 12)
-        if p_ls and p_rs:
-            p_ls = _norm_xy(p_ls, w, h)
-            p_rs = _norm_xy(p_rs, w, h)
-            # normaliser par la largeur de l'image
-            ouverture_epaules = _dist(p_ls, p_rs) / max(1.0, float(w))
-
-    # libération
-    fm.close()
-    pose.close()
-    hands.close()
-
-    return {"bouche_ouverture": bouche_ouverture,
-            "orientation_tete": orientation_tete,
-            "ouverture_epaules": ouverture_epaules,
-            "nb_mains": int(nb_mains),
-            "hand_boxes": hand_boxes}
+    return {
+        "ouverture_epaules": ouverture_epaules,
+        "nb_mains": int(nb_mains),
+        "hand_boxes": hand_boxes,
+    }
 
 
 # =========================
@@ -222,7 +300,11 @@ def calculer_attitudes_depuis_images(
     activer_mediapipe: bool = True,
     activer_openpose: bool = False,
     chemin_openface: str = "FeatureExtraction",
-    binaire_openpose: str = "openpose"
+    binaire_openpose: str = "openpose",
+    activer_deepface: bool = True,
+    activer_yolov8: bool = True,
+    backend_deepface: str | None = None,
+    modele_yolov8_pose: str | None = None,
 ):
     """
     calculer les attitudes à partir des images déjà chargées dans st.session_state["images_store"]
@@ -232,9 +314,21 @@ def calculer_attitudes_depuis_images(
     Remarque :
     - OpenFace et OpenPose ne sont pas exécutés ici (binaire externe requis).
       On expose malgré tout des colonnes 'au_*' et 'openpose_ok' à NaN/False pour compatibilité.
-    - Si MediaPipe n'est pas disponible ou désactivé, des NaN seront renvoyés et un avertissement affiché.
+    - Si DeepFace ou YOLOv8 ne sont pas disponibles (ou désactivés), des NaN seront renvoyés et un avertissement affiché.
     - Les timestamps sont récupérés depuis st.session_state["df_images"] (colonne t_image).
     """
+
+    global _POSE_MODEL_NAME, _POSE_MODEL, _POSE_MODEL_FAILED, _POSE_MODEL_ERR
+
+    if not activer_mediapipe:
+        activer_deepface = False
+        activer_yolov8 = False
+
+    if modele_yolov8_pose and modele_yolov8_pose != _POSE_MODEL_NAME:
+        _POSE_MODEL_NAME = modele_yolov8_pose
+        _POSE_MODEL = None
+        _POSE_MODEL_FAILED = False
+        _POSE_MODEL_ERR = ""
 
     if images_store is None or len(images_store) == 0:
         return pd.DataFrame(columns=[
@@ -276,14 +370,18 @@ def calculer_attitudes_depuis_images(
 
         arr = _to_np(img)
 
-        # MediaPipe si demandé et dispo
-        if activer_mediapipe and _mp_ok:
-            feats = _analyser_image_mediapipe(arr)
+        # DeepFace / YOLOv8 si demandés et disponibles
+        if activer_deepface and _deepface_ok:
+            face_feats = _analyse_image_deepface(arr, backend=backend_deepface)
         else:
-            feats = {"bouche_ouverture": np.nan, "orientation_tete": np.nan,
-                     "ouverture_epaules": np.nan, "nb_mains": 0, "hand_boxes": []}
+            face_feats = {"bouche_ouverture": np.nan, "orientation_tete": np.nan, "face_box": None}
 
-        hand_boxes = feats.get("hand_boxes", [])
+        if activer_yolov8:
+            pose_feats = _analyse_image_pose(arr)
+        else:
+            pose_feats = {"ouverture_epaules": np.nan, "nb_mains": 0, "hand_boxes": []}
+
+        hand_boxes = pose_feats.get("hand_boxes", [])
         try:
             annotated_img = _draw_boxes_on_image(img, hand_boxes)
             buf = io.BytesIO()
@@ -303,10 +401,10 @@ def calculer_attitudes_depuis_images(
         lignes.append({
             "fichier_image": name,
             "t_image": float(t_by_name.get(name, np.nan)),
-            "bouche_ouverture": feats["bouche_ouverture"],
-            "orientation_tete": feats["orientation_tete"],
-            "ouverture_epaules": feats["ouverture_epaules"],
-            "nb_mains": feats["nb_mains"],
+            "bouche_ouverture": face_feats.get("bouche_ouverture", np.nan),
+            "orientation_tete": face_feats.get("orientation_tete", np.nan),
+            "ouverture_epaules": pose_feats.get("ouverture_epaules", np.nan),
+            "nb_mains": pose_feats.get("nb_mains", 0),
             "hand_boxes": hand_boxes,
             "image_annotee": annotated_bytes,
             "au_01": au_01, "au_02": au_02, "au_04": au_04, "au_06": au_06, "au_12": au_12,
@@ -329,8 +427,25 @@ def calculer_attitudes_depuis_images(
     df_sum  = df_agg.groupby("t_sec", dropna=True)[agg_cols_sum].sum().reset_index()
     df_nv_agrege = pd.merge(df_mean, df_sum, on="t_sec", how="outer").sort_values("t_sec")
 
-    if not _mp_ok and activer_mediapipe:
-        st.warning("MediaPipe n’est pas installé. Les indicateurs non verbaux issus de MediaPipe sont renvoyés en NaN.")
+    if activer_deepface and (not _deepface_ok or _df_detect_faces is None):
+        msg = "DeepFace n’est pas disponible. Les indicateurs visage sont renvoyés en NaN."
+        if _deepface_err:
+            msg += f" (détail: {_deepface_err})"
+        st.warning(msg)
+    if activer_yolov8:
+        if not _yolo_ok or YOLO is None:
+            msg = "YOLOv8 n’est pas disponible. Les indicateurs pose/mains sont renvoyés en NaN."
+            if _yolo_err:
+                msg += f" (détail: {_yolo_err})"
+            st.warning(msg)
+        elif _POSE_MODEL_FAILED:
+            msg = (
+                f"Le modèle YOLOv8 pose '{_POSE_MODEL_NAME}' n’a pas pu être chargé. "
+                "Les indicateurs pose/mains sont renvoyés en NaN."
+            )
+            if _POSE_MODEL_ERR:
+                msg += f" (détail: {_POSE_MODEL_ERR})"
+            st.warning(msg)
 
     return df_nv_images, df_nv_agrege
 
