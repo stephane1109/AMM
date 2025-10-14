@@ -1,5 +1,5 @@
 # emotions.py
-# Détection d'émotions sur images fixes synchronisées – sortie 6 labels FER (sans "neutral")
+# Détection d'émotions sur images fixes synchronisées – sortie 6 labels DeepFace (sans "neutral")
 
 from __future__ import annotations
 import io, os, json
@@ -12,7 +12,7 @@ import altair as alt
 from PIL import Image, ImageOps, ImageDraw, ImageFont
 
 # ===== Dépendances optionnelles
-_FER_ERR = ""
+_DEEPFACE_ERR = ""
 _CV2_ERR = ""
 _XLSX_OK = False
 try:
@@ -31,12 +31,12 @@ except Exception as exc:
     _CV2_ERR = str(exc)
 
 try:
-    from fer import FER  # type: ignore
+    from deepface import DeepFace  # type: ignore
 
-    _FER_OK = True
+    _DEEPFACE_OK = True
 except Exception as exc:
-    _FER_OK = False
-    _FER_ERR = str(exc)
+    _DEEPFACE_OK = False
+    _DEEPFACE_ERR = str(exc)
 
 try:
     import mediapipe as mp  # type: ignore
@@ -45,8 +45,12 @@ try:
 except Exception:
     _MP_OK = False
 
+from modelesdetect import BaseDetector, create_detector
+
 # ===== Constantes
 EMO6 = ["angry", "disgust", "fear", "happy", "sad", "surprise"]  # 6 labels demandés
+DETECTOR_BACKEND = "retinaface"
+DEEPFACE_EMOTIONS = ["angry", "disgust", "fear", "happy", "sad", "surprise", "neutral"]
 
 
 # ===== Outils
@@ -65,7 +69,7 @@ def _to_numpy(im: Image.Image) -> np.ndarray:
 
 def _ensure_6(emotions: Dict[str, float]) -> Dict[str, float]:
     """
-    Convertit un dictionnaire de scores FER en 6 labels (sans 'neutral').
+    Convertit un dictionnaire de scores d'émotions en 6 labels (sans 'neutral').
     - Supprime neutral s'il existe et renormalise
     - Ajoute les labels manquants à 0.0
     """
@@ -94,18 +98,26 @@ def _top_emo6(emotions_6: Dict[str, float]) -> Tuple[str, float]:
 # ===== Modèles
 
 @st.cache_resource(show_spinner=False)
-def _load_fer() -> Tuple[Any | None, str]:
-    if not _FER_OK:
-        msg = "Le paquet `fer` n’est pas disponible. Installez-le avec `pip install fer`."
-        if _FER_ERR:
-            msg += f" (détail: {_FER_ERR})"
+def _load_deepface_emotion_model() -> Tuple[Any | None, str]:
+    if not _DEEPFACE_OK:
+        msg = "Le paquet `deepface` n’est pas disponible. Installez-le avec `pip install deepface`."
+        if _DEEPFACE_ERR:
+            msg += f" (détail: {_DEEPFACE_ERR})"
         return None, msg
     try:
-        # MTCNN améliore la localisation des visages
-        det = FER(mtcnn=True)
-        return det, "FER initialisé (mtcnn=True)."
+        model = DeepFace.build_model("Emotion")  # type: ignore[attr-defined]
+        return model, "Modèle d’émotions DeepFace initialisé."
     except Exception as e:
-        return None, f"Échec init FER: {e}"
+        return None, f"Échec init DeepFace Emotion: {e}"
+
+
+@st.cache_resource(show_spinner=False)
+def _load_detector_backend() -> Tuple[BaseDetector | None, str]:
+    try:
+        detector = create_detector(DETECTOR_BACKEND)
+        return detector, f"Détecteur visage ({DETECTOR_BACKEND}) prêt."
+    except Exception as e:
+        return None, f"Échec chargement détecteur {DETECTOR_BACKEND}: {e}"
 
 
 @st.cache_resource(show_spinner=False)
@@ -138,16 +150,47 @@ def _load_mediapipe_face() -> Tuple[Any | None, str]:
 
 # ===== Pipelines
 
-def _fer_detect_full(fer_det: Any, arr: np.ndarray) -> List[Dict[str, Any]]:
-    """
-    Utilise FER.detect_emotions directement sur l'image complète.
-    Retour: liste de dicts avec 'box' ([x,y,w,h]) et 'emotions' (scores 7 ou 8 labels).
-    """
+def _detector_faces(detector: BaseDetector | None, arr: np.ndarray) -> List[Tuple[Tuple[int, int, int, int], float]]:
+    """Retourne les boîtes détectées par le backend choisi."""
+
+    if detector is None:
+        return []
     try:
-        preds = fer_det.detect_emotions(arr)  # type: ignore[attr-defined]
-        return preds or []
+        detections = detector.detect(arr)
     except Exception:
         return []
+    boxes: List[Tuple[Tuple[int, int, int, int], float]] = []
+    for det in detections:
+        try:
+            x1, y1, x2, y2 = [int(v) for v in det.box]
+        except Exception:
+            continue
+        if x2 <= x1 or y2 <= y1:
+            continue
+        conf = float(getattr(det, "confidence", 0.0))
+        conf = max(0.0, min(1.0, conf))
+        boxes.append(((x1, y1, x2, y2), conf))
+    return boxes
+
+
+def _predict_deepface_emotions(model: Any | None, face: np.ndarray) -> Tuple[Dict[str, float], str, float]:
+    if model is None or face.size == 0:
+        return {k: 0.0 for k in EMO6}, "none", 0.0
+    try:
+        gray = Image.fromarray(face).convert("L").resize((48, 48), Image.BILINEAR)
+        arr = np.array(gray, dtype="float32") / 255.0
+        arr = arr.reshape((1, 48, 48, 1))
+        preds = model.predict(arr, verbose=0)
+        preds_arr = np.asarray(preds, dtype="float32").reshape(-1)
+        emotions = {
+            emo: float(preds_arr[i])
+            for i, emo in enumerate(DEEPFACE_EMOTIONS[: len(preds_arr)])
+        }
+        emo6 = _ensure_6(emotions)
+        lab, sc = _top_emo6(emo6)
+        return emo6, lab, sc
+    except Exception:
+        return {k: 0.0 for k in EMO6}, "none", 0.0
 
 
 def _cv2_faces(cascade: Any, arr: np.ndarray) -> List[Tuple[int, int, int, int]]:
@@ -204,92 +247,44 @@ def _crop(arr: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> np.ndarray:
     return arr[y1:y2, x1:x2]
 
 
-def _bbox_from_box(box: Any, w: int, h: int) -> Tuple[int, int, int, int]:
-    """
-    FER renvoie box=[x,y,w,h] ; on convertit en (x1,y1,x2,y2) borné à l’image.
-    """
-    try:
-        x, y, bw, bh = [int(round(float(v))) for v in box[:4]]
-    except Exception:
-        return 0, 0, 0, 0
-    x1, y1 = max(0, x), max(0, y)
-    x2, y2 = min(w, x + bw), min(h, y + bh)
-    if x2 <= x1 or y2 <= y1:
-        return 0, 0, 0, 0
-    return x1, y1, x2, y2
-
-
 def _analyze_one_image(
-        fer_det: Any | None,
+        emotion_model: Any | None,
+        detector_backend: BaseDetector | None,
         cv2_cascade: Any | None,
         mp_face_detection: Any | None,
         b: bytes
 ) -> List[Dict[str, Any]]:
     """
     Sortie: liste de {bbox:(x1,y1,x2,y2), emotions_6:dict, label:str, score:float}
-    - 1) On tente MediaPipe pour la détection (plus précis pour le centrage)
-    - 2) Sinon on tente FER plein cadre
-    - 3) Si zéro résultat mais cascade dispo => on croppe chaque visage et on reclasse avec FER
+    - 1) Détection via le backend configuré (RetinaFace par défaut)
+    - 2) Repli MediaPipe si aucune boîte détectée
+    - 3) Repli cascade OpenCV en dernier recours
     """
     im = _img_from_bytes(b)
     if im is None:
         return []
     arr = _to_numpy(im)
-    H, W = arr.shape[:2]
     results: List[Dict[str, Any]] = []
 
-    # 1) Priorité : MediaPipe pour la détection (meilleur centrage)
-    faces_mediapipe = []
-    if mp_face_detection is not None:
+    # 1) Détection principale via le backend configuré
+    candidate_faces = _detector_faces(detector_backend, arr)
+
+    # 2) Fallback : MediaPipe pour les boîtes si rien détecté
+    if not candidate_faces and mp_face_detection is not None:
         faces_mediapipe = _mediapipe_faces(mp_face_detection, arr)
+        candidate_faces = [((x1, y1, x2, y2), 0.0) for (x1, y1, x2, y2) in faces_mediapipe]
 
-    # Si MediaPipe a trouvé des visages, on les analyse avec FER
-    if faces_mediapipe and fer_det is not None:
-        for (x1, y1, x2, y2) in faces_mediapipe:
-            face = _crop(arr, x1, y1, x2, y2)
-            try:
-                sub = fer_det.detect_emotions(face) or []  # type: ignore[attr-defined]
-            except Exception:
-                sub = []
-            if sub:
-                emos = sub[0].get("emotions", {}) or {}
-                emo6 = _ensure_6(emos)
-                lab, sc = _top_emo6(emo6)
-            else:
-                emo6 = {k: 0.0 for k in EMO6}
-                lab, sc = "none", 0.0
-            results.append({"bbox": (x1, y1, x2, y2), "emotions_6": emo6, "label": lab, "score": sc})
+    # 3) Fallback final : cascade OpenCV
+    if not candidate_faces and cv2_cascade is not None:
+        faces_cv = _cv2_faces(cv2_cascade, arr)
+        candidate_faces = [((x1, y1, x2, y2), 0.0) for (x1, y1, x2, y2) in faces_cv]
 
-    # 2) Fallback : FER direct (si MediaPipe n'a rien trouvé)
-    if (not results) and (fer_det is not None):
-        preds = _fer_detect_full(fer_det, arr)
-        for p in preds:
-            box = p.get("box", [])
-            emos = p.get("emotions", {}) or {}
-            x1, y1, x2, y2 = _bbox_from_box(box, W, H)
-            if x2 <= x1 or y2 <= y1:
-                continue
-            emo6 = _ensure_6(emos)
-            lab, sc = _top_emo6(emo6)
-            results.append({"bbox": (x1, y1, x2, y2), "emotions_6": emo6, "label": lab, "score": sc})
-
-    # 3) Fallback final : visages OpenCV + reclassement par FER
-    if (not results) and (cv2_cascade is not None) and (fer_det is not None):
-        faces = _cv2_faces(cv2_cascade, arr)
-        for (x1, y1, x2, y2) in faces:
-            face = _crop(arr, x1, y1, x2, y2)
-            try:
-                sub = fer_det.detect_emotions(face) or []  # type: ignore[attr-defined]
-            except Exception:
-                sub = []
-            if sub:
-                emos = sub[0].get("emotions", {}) or {}
-                emo6 = _ensure_6(emos)
-                lab, sc = _top_emo6(emo6)
-            else:
-                emo6 = {k: 0.0 for k in EMO6}
-                lab, sc = "none", 0.0
-            results.append({"bbox": (x1, y1, x2, y2), "emotions_6": emo6, "label": lab, "score": sc})
+    for (x1, y1, x2, y2), det_score in candidate_faces:
+        face = _crop(arr, x1, y1, x2, y2)
+        emo6, lab, sc = _predict_deepface_emotions(emotion_model, face)
+        # combine score with detection confidence to prioriser visages crédibles
+        score = sc if det_score <= 0 else min(1.0, 0.5 * sc + 0.5 * float(det_score))
+        results.append({"bbox": (x1, y1, x2, y2), "emotions_6": emo6, "label": lab, "score": score})
 
     # Classement: visage le plus crédible en premier (aire * score)
     if results:
@@ -378,16 +373,22 @@ def _export_excel(df: pd.DataFrame, names: List[str]) -> Tuple[str | None, Dict[
 # ===== UI principale
 
 def ui_emotions_images(df_images: pd.DataFrame | None, orientation_images: str | None = None) -> None:
-    st.subheader("Analyse des émotions (images, 6 labels FER)")
+    st.subheader("Analyse des émotions (images, 6 labels DeepFace)")
     # Charger modèles
-    fer_det, msg_fer = _load_fer()
-    st.caption(msg_fer)
+    emotion_model, msg_model = _load_deepface_emotion_model()
+    st.caption(msg_model)
+    if emotion_model is None:
+        st.warning("Modèle DeepFace indisponible : impossible de lancer l’analyse des émotions.")
+        return
+
+    detector_backend, msg_detector = _load_detector_backend()
+    st.caption(msg_detector)
     cv_cascade, msg_cv = _load_cv2_face()
     if cv_cascade is None:
         st.caption(msg_cv)
     mp_face_detection, msg_mp = _load_mediapipe_face()
     if mp_face_detection is not None:
-        st.caption(msg_mp + " (détection prioritaire pour un meilleur centrage)")
+        st.caption(msg_mp + " (solution de repli pour la détection)")
 
     images_store = st.session_state.get("images_store", []) or []
     names = [it["name"] for it in images_store if isinstance(it, dict) and "name" in it]
@@ -408,7 +409,7 @@ def ui_emotions_images(df_images: pd.DataFrame | None, orientation_images: str |
             if b is None:
                 continue
 
-            dets = _analyze_one_image(fer_det, cv_cascade, mp_face_detection, b)
+            dets = _analyze_one_image(emotion_model, detector_backend, cv_cascade, mp_face_detection, b)
 
             # Annoté
             im = _img_from_bytes(b)
